@@ -1,6 +1,10 @@
 import string
-
 import os
+
+import numpy as np
+
+from .assembly import Assembly
+from . import compilation
 
 ROOT = os.path.dirname(__file__)
 TEMPLATE = os.path.join(ROOT, 'sym_eval.template.c')
@@ -19,45 +23,26 @@ KEYWORDS = {
 }
 
 __all__ = [
-  'compile',
-  'link'
+  'StackMachine'
 ]
 
-def get_hash(library: dict[str, str]):
+def get_hash(library: Assembly, max_stack_size: int, debug: bool):
   import hashlib
-  hash = hashlib.sha256()
+  algo = hashlib.sha256()
 
-  for k, code in library.items():
-    hash.update(k.encode('utf-8'))
-    hash.update('|'.encode('utf-8'))
-    hash.update(code.encode('utf-8'))
+  algo.update(repr(library).encode())
+  algo.update('!'.encode())
+  algo.update(repr(max_stack_size).encode())
+  algo.update('!'.encode())
+  algo.update(repr(debug).encode())
 
-  return hash.hexdigest()
+  return algo.hexdigest()
 
-def generate(*libraries: dict[str, str], output: bytes | str | None = None):
-  library = dict()
-
-  for lib in libraries:
-    for k in lib:
-      k_lower = k.lower()
-
-      if k_lower in library:
-        raise ValueError(f'operator {k_lower} is already in the library')
-
-      library[k_lower] = lib[k]
-
-  order = dict((k, i) for i, k in enumerate(library.keys()))
-
-  instruction_symbols = {}
-  instruction_symbol_defines = {}
-  for k, i in order.items():
-    instruction_symbols[k] = f'SYMGEN_INSTRUCTION_{k.upper()}'
-    instruction_symbol_defines[k] = f'#define SYMGEN_INSTRUCTION_{k.upper()} {i}'
-
+def generate(library: Assembly, max_stack_size: int=1024, debug: bool=False):
   commands = {}
   command_switches = {}
 
-  for k, code in library.items():
+  for k, code in library.ops.items():
     template = string.Template(code)
 
     used_identifiers = set(template.get_identifiers())
@@ -86,7 +71,7 @@ def generate(*libraries: dict[str, str], output: bytes | str | None = None):
 
     function_name = f'symgen_instruction_{k}'
 
-    command_switches[k] = (f'          case {instruction_symbols[k]}:\n'
+    command_switches[k] = (f'          case {library.symbols[k]}:\n'
                            f'            {function_name}({call_arguments});\n'
                            f'            break;')
 
@@ -112,15 +97,8 @@ def generate(*libraries: dict[str, str], output: bytes | str | None = None):
   with open(TEMPLATE, 'r') as f:
     module_template = string.Template(f.read())
 
-  all_defines = '\n'.join((
-    *('defines', ),
-    *(d for d in instruction_symbol_defines.values())
-  ))
-
-  all_commands = '\n\n'.join((
-    *('commands', ),
-    *(commands.values())
-  ))
+  all_defines = '\n'.join(d for d in library.symbol_defines.values())
+  all_commands = '\n\n'.join(commands.values())
 
   switch_table = '\n\n'.join((
     *('command switch table', ),
@@ -129,80 +107,57 @@ def generate(*libraries: dict[str, str], output: bytes | str | None = None):
 
   all_names = ', '.join([
     f'"{name}"'
-    for name in library
+    for name in library.ops
   ])
+
+  stack_size = f'#define MAXIMAL_STACK_SIZE {max_stack_size}'
+  if debug:
+    debug_define = '#define SYMGEN_DEBUG'
+  else:
+    debug_define = '// SYMGEN_DEBUG off'
+
+  machine_hash = get_hash(library, max_stack_size, debug)
 
   module_code = module_template.substitute({
     'DEFINES': all_defines,
     'COMMANDS': all_commands,
     'COMMAND_SWITCH': switch_table,
-    'COMMAND_NAMES': all_names
+    'COMMAND_NAMES': all_names,
+    'STACK_SIZE': stack_size,
+    'HASH': f'"{machine_hash}"',
+    'DEBUG': debug_define
   })
 
-  hash = get_hash(library)
+  return machine_hash, module_code
 
-  if output is None:
-    output = f'sym_eval-{hash}.c'
+class StackMachine(object):
+  def __init__(
+    self, *libraries: dict[str, str],
+    debug: bool=False,
+    shared: bytes | str | None=None,
+    source: bytes | str | None=None,
+    max_stack_size: int=1024,
+  ):
+    self.assembly = Assembly(*libraries)
 
-  with open(output, 'w') as f:
-    f.write(module_code)
-
-  return hash, output
-
-LIB_FLAGS = ['--shared', '-fPIC']
-OPT_FLAGS = ['-O3', '-march=native', '-mtune=native']
-
-def compile(*libraries: dict[str, str], output: bytes | str | None=None, source: bytes | str | None=None, debug: bool=False):
-  import sysconfig
-  import subprocess as sp
-  import tempfile
-
-  import numpy as np
-
-  if source is None:
-    _, source_file = tempfile.mkstemp(suffix='.c')
-  else:
-    source_file = source
-
-  try:
-    hash, source_file = generate(*libraries, output=source_file)
-
-    include_dirs = [*sysconfig.get_paths()['include'].split(' '), np.get_include()]
-    include_dirs = [f'-I{l}' for l in include_dirs]
-    cflags = sysconfig.get_config_vars().get('CFLAGS').split(' ')
-    ldflags = sysconfig.get_config_vars().get('LDFLAGS').split(' ')
-    debug = ('-DDEBUG', ) if debug else ()
-
-    if output is None:
-      suffix = sysconfig.get_config_vars().get('EXT_SUFFIX')
-      output = f'sym_eval-{hash}{suffix}'
-
-    print([source_file, *LIB_FLAGS, *OPT_FLAGS, *include_dirs, *cflags, *ldflags, *debug, '-o', output])
-
-    process = sp.Popen(
-      executable='gcc',
-      args=['gcc', source_file, *LIB_FLAGS, *OPT_FLAGS, *include_dirs, *ldflags, *debug, '-o', output],
-      stdout=sp.PIPE, stderr=sp.PIPE, stdin=None
+    self.shared, self.machine = compilation.ensure(
+      generate=lambda : generate(self.assembly, max_stack_size=max_stack_size, debug=debug),
+      get_hash= lambda: get_hash(self.assembly, max_stack_size=max_stack_size, debug=debug),
+      name='sym_eval', shared=shared, source=source
     )
 
-    stdout, stderr = process.communicate()
-    if process.returncode != 0:
-      print('===== stdout =====')
-      print(stdout.decode('utf-8'))
-      print('===== stderr =====')
-      print(stderr.decode('utf-8'))
-      raise Exception('Compilation failed')
+  def evaluate(self, code, *arguments):
+    bin_code = self.assembly.assemble(code)
 
-  finally:
-    if source is None:
-      os.remove(source_file)
+    sizes = np.array([bin_code.shape[0], ], dtype=np.int32)
+    inputs = np.array([[[float(x) for x in arguments]]], dtype=np.float32)
+    outputs = np.zeros(shape=(1, 1, 1), dtype=np.float32)
 
-  return output
+    result = self.machine.stack_eval(bin_code, sizes, inputs, outputs)
+    if result != 0:
+      raise ValueError('machine has failed to execute')
 
-def link(shared: bytes | str | None):
-  import importlib.util
-  spec = importlib.util.spec_from_file_location("sym_eval", shared)
-  mymodule = importlib.util.module_from_spec(spec)
-  spec.loader.exec_module(mymodule)
+    return np.reshape(outputs, shape=())
 
-  return mymodule
+
+

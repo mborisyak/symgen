@@ -1,63 +1,43 @@
-#define PY_SSIZE_T_CLEAN
+#include "symgen.h"
 
 #include <math.h>
-#include <stdio.h>
-#include <limits.h>
-#include <time.h>
 
 #include <Python.h>
-
-#define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include "numpy/arrayobject.h"
 
-#ifdef DEBUG
+// debug on / off
+${DEBUG}
+
+#ifdef SYMGEN_DEBUG
     #define DEBUG_PRINT(fmt, ...) \
         fprintf(stderr, fmt, ##__VA_ARGS__)
 #else
     #define DEBUG_PRINT(fmt, ...)
 #endif
 
-#define MAXIMAL_STACK_SIZE 1024
-
-#define INT_T NPY_INT32
-#define NUMBER_T NPY_FLOAT32
-
-typedef npy_int32 int_t;
-typedef npy_float32 number_t;
-
-typedef unsigned char byte;
-typedef unsigned int uint;
-
-typedef union {
-  int_t integer;
-  number_t number;
-} arg_t;
-
-typedef struct {
-  int_t command;
-  arg_t argument;
-} instruction_t;
-
-#define NONE 0
+// stack size
+${STACK_SIZE}
 
 static inline number_t pop(number_t ** stack) {
   --(*stack);
   const number_t element = **stack;
-  DEBUG_PRINT("[DEBUG] pop %.1f\n", element);
+  DEBUG_PRINT("[DEBUG] pop %f\n", element);
   return element;
 }
 
 static inline void push(number_t ** stack, number_t element) {
   **stack = element;
-  DEBUG_PRINT("[DEBUG] push %.1f\n", element);
+  DEBUG_PRINT("[DEBUG] push %f\n", element);
   (*stack)++;
 }
 
-// ${DEFINES}
+// op code constants
+${DEFINES}
 
 const char * COMMAND_NAMES[] = {${COMMAND_NAMES}};
 
-// ${COMMANDS}
+// command definitions
+${COMMANDS}
 
 
 static PyObject * stack_eval(PyObject *self, PyObject *args) {
@@ -193,7 +173,7 @@ static PyObject * stack_eval(PyObject *self, PyObject *args) {
         #ifdef DEBUG
         DEBUG_PRINT("[DEBUG] stack: [");
         for (number_t * stack_tr = empty_stack; stack_tr < stack; ++stack_tr) {
-          DEBUG_PRINT("%.1f ", *stack_tr);
+          DEBUG_PRINT("%f ", *stack_tr);
         }
         DEBUG_PRINT("]\n");
         #endif
@@ -214,8 +194,31 @@ static PyObject * stack_eval(PyObject *self, PyObject *args) {
   return PyLong_FromLong(0);
 }
 
+static PyObject * hash(PyObject *self, PyObject *args) {
+  if (!PyArg_UnpackTuple(args, "hash", 0, 0)) {
+    return NULL;
+  }
+
+  PyObject *py_str = PyUnicode_FromString(${HASH});
+  return py_str;
+}
+
+static PyObject * debug_on(PyObject *self, PyObject *args) {
+  if (!PyArg_UnpackTuple(args, "debug_on", 0, 0)) {
+    return NULL;
+  }
+
+#ifdef DEBUG
+  return PyBool_FromLong(1);
+#else
+  return PyBool_FromLong(0);
+#endif
+}
+
 static PyMethodDef SymGenMethods[] = {
     {"stack_eval",  stack_eval, METH_VARARGS, "evaluates expressions."},
+    {"hash",  hash, METH_VARARGS, "returns the machine hash."},
+    {"debug_on",  debug_on, METH_VARARGS, "returns True if debug is on."},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 

@@ -1,5 +1,7 @@
 __all__ = [
-  'core', 'std'
+  'core', 'std',
+
+  'merge'
 ]
 
 core = dict(
@@ -9,6 +11,11 @@ core = dict(
   memory='${memory}[${argument}.integer]',
   store='${memory}[${argument}.integer] = pop(${stack});\n'
         'return;',
+)
+
+const = dict(
+  one='1.0',
+  pi='pi',
 )
 
 std = dict(
@@ -29,3 +36,18 @@ std = dict(
   inv='const number_t a = pop(${stack});\n'
       '1 / a',
 )
+
+
+def merge(*libraries: dict[str, str]):
+  library = dict()
+
+  for lib in libraries:
+    for k in lib:
+      k_lower = k.lower()
+
+      if k_lower in library:
+        raise ValueError(f'operator {k_lower} is already in the library')
+
+      library[k_lower] = lib[k]
+
+  return library
