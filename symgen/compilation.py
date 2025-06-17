@@ -3,8 +3,8 @@ import os
 ROOT = os.path.dirname(__file__)
 
 LIB_FLAGS = ['--shared', '-fPIC']
-# OPT_FLAGS = ['-O3', '-march=native', '-mtune=native']
-OPT_FLAGS = ['-O2']
+OPT_FLAGS = ['-O3', '-march=native', '-mtune=native']
+# OPT_FLAGS = ['-O2']
 
 __all__ = [
   'compile',

@@ -46,7 +46,7 @@ def test_grammar_hash():
     ],
     transitions={
       symbol('expr', 'i > 0'): {
-        symbol('expr', 'i - 1') + symbol('expr', 'i - 1') + symbol('add'): 1,
+        symbol('expr', j=0, i='i - 1') + symbol('expr', 'i - 1') + symbol('add'): 1,
         symbol('expr', 'i - 1') + symbol('expr', 'i - 1') + symbol('multiply'): 1,
         symbol('constant'): 2,
       },
@@ -58,10 +58,17 @@ def test_grammar_hash():
       symbol('multiply'): {
         symbol('mul'): 1
       },
-      symbol('constant'): {
+      symbol('constant', 'input_set.size > 0'): {
+        symbol('constant', input_set='RANDOM_SUBSET', depth='depth'): 2,
+        symbol('input', 'RANDOM_INPUT'): 5,
         symbol('const', 0.0): 1,
-        symbol('const', 1.0): 5,
-        symbol('const', math.pi): 5,
+        symbol('const', 1.0): 1,
+        symbol('const', math.pi): 1,
+      },
+      symbol('constant',): {
+        symbol('const', 0.0): 1,
+        symbol('const', 1.0): 1,
+        symbol('const', math.pi): 1,
       }
     }
   )
@@ -72,7 +79,9 @@ def test_grammar_hash():
     source='sym_gen.c', debug=True
   )
 
-  instructions, instruction_sizes = generator.generate(1, 2, max_depth=10, instruction_limit=1024, expression_limit=8)
+  instructions, instruction_sizes = generator.generate(
+    1234567, 765432, max_depth=10, instruction_limit=1024, expression_limit=8, max_inputs=2
+  )
   print(instructions)
   print(instruction_sizes)
   c = 0

@@ -93,13 +93,36 @@ typedef struct {
   int size;
 } VariableSet;
 
+static inline void print_set(VariableSet var_set) {
+  for (int i = 0; i < BIT_SET_SIZE; ++i) {
+    for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
+      int value = (var_set.bitset[i] & (1u << j)) ? 1 : 0;
+      printf("%d ", value);
+    }
+    printf(" ");
+  }
+  printf("(size = %d)", var_set.size);
+}
+
 static inline int random_element(pcg32_random_t * rng, VariableSet var_set) {
-  uint32_t n = pcg32_random_r(rng) % var_set.size;
+  uint32_t u = pcg32_random_r(rng);
+  uint32_t n = u % var_set.size;
+
+  #ifdef SYMGEN_DEBUG
+    printf("selecting %d (%d) from: ", n, u);
+    print_set(var_set);
+    printf("\n");
+  #endif
 
   for (int i = 0; i < BIT_SET_SIZE; ++i) {
     for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
       if (var_set.bitset[i] & (1u << j)) {
         if (n == 0) {
+
+          #ifdef SYMGEN_DEBUG
+            printf("selected %d\n", i * sizeof(bitmask_t) * BYTES + j);
+          #endif
+
           return i * sizeof(bitmask_t) * BYTES + j;
         } else {
           --n;
@@ -215,20 +238,20 @@ static inline VariableSet random_subset_p_non_empty(pcg32_random_t * rng, Variab
   if (result.size == 0) {
     if (p > 0.25) {
       return random_subset_p_non_empty(rng, var_set, p);
-    } else {
-      /// forcing one bit because rejection sampling might take a lot of iterations
-      uint32_t n = pcg32_random_r(rng) % var_set.size;
-      for (int i = 0; i < BIT_SET_SIZE; ++i) {
-        for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
-          const bitmask_t offset = (1u << j);
-          if (var_set.bitset[i] & offset) {
-            if (n == 0) {
-              result.bitset[i] |= offset;
-              result.size = 1;
-              return result;
-            } else {
-              --n;
-            }
+    }
+
+    /// forcing one bit because rejection sampling might take a lot of iterations
+    uint32_t n = pcg32_random_r(rng) % var_set.size;
+    for (int i = 0; i < BIT_SET_SIZE; ++i) {
+      for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
+        const bitmask_t offset = (1u << j);
+        if (var_set.bitset[i] & offset) {
+          if (n == 0) {
+            result.bitset[i] |= offset;
+            result.size = 1;
+            return result;
+          } else {
+            --n;
           }
         }
       }
@@ -256,18 +279,12 @@ static inline VariableSet variable_set_full(int n) {
   return var_set;
 }
 
-static inline void print_set(VariableSet var_set) {
-  for (int i = 0; i < BIT_SET_SIZE; ++i) {
-    for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
-      int value = (var_set.bitset[i] & (1u << j)) ? 1 : 0;
-      printf("%d ", value);
-    }
-    printf(" ");
-  }
-}
-
 // defines
 ${DEFINES}
+
+#define RANDOM_SUBSET_P(prob) (random_subset_p(rng, input_set, prob))
+#define RANDOM_SUBSET (random_subset(rng, input_set))
+#define RANDOM_INPUT (random_element(rng, input_set))
 
 ${DECLARATIONS}
 
@@ -368,6 +385,7 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
   InstructionStack instruction_stack = (InstructionStack) {
     .stack=instructions, .empty=instructions, .full=instructions_end
   };
+  VariableSet input_set = variable_set_full(max_inputs);
 
   int expression_index = 0;
   while (instruction_stack.stack < instruction_stack.full && expression_index < max_expressions) {

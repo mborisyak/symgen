@@ -127,9 +127,9 @@ static PyObject * stack_eval(PyObject *self, PyObject *args) {
 
   const npy_intp instructions_stride_0 = PyArray_STRIDE(instructions_array, 0) / sizeof(int_t);
 
-  const npy_intp inputs_stride_0 = PyArray_STRIDE(instructions_array, 0) / sizeof(number_t);
-  const npy_intp inputs_stride_1 = PyArray_STRIDE(instructions_array, 1) / sizeof(number_t);
-  const npy_intp inputs_stride_2 = PyArray_STRIDE(instructions_array, 2) / sizeof(number_t);
+  const npy_intp inputs_stride_0 = PyArray_STRIDE(inputs_array, 0) / sizeof(number_t);
+  const npy_intp inputs_stride_1 = PyArray_STRIDE(inputs_array, 1) / sizeof(number_t);
+  const npy_intp inputs_stride_2 = PyArray_STRIDE(inputs_array, 2) / sizeof(number_t);
 
   const npy_intp outputs_stride_0 = PyArray_STRIDE(outputs_array, 0) / sizeof(number_t);
   const npy_intp outputs_stride_1 = PyArray_STRIDE(outputs_array, 1) / sizeof(number_t);

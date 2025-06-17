@@ -41,7 +41,7 @@ class Assembly(object):
     self.op_codes = {}
 
     for i, op_name in enumerate(self.ops):
-      symbol = f'SYMGEN_INSTRUCTION_{op_name}'
+      symbol = f'SYMGEN_INSTRUCTION_{op_name.upper()}'
       self.symbols[op_name] = symbol
       self.symbol_defines[op_name] = f'#define {symbol} {i}'
       self.op_names[i] = op_name

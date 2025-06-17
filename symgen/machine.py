@@ -146,6 +146,13 @@ class StackMachine(object):
       name='sym_eval', shared=shared, source=source
     )
 
+  def execute(self, bin_code, sizes, inputs, outputs):
+    result = self.machine.stack_eval(bin_code, sizes, inputs, outputs)
+    if result != 0:
+      raise ValueError('machine has failed to execute')
+
+    return outputs
+
   def evaluate(self, code, *arguments):
     bin_code = self.assembly.assemble(code)
 

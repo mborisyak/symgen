@@ -27,11 +27,12 @@ __all__ = [
 ]
 
 class Symbol(object):
-  __slots__ = ('name', 'arguments')
+  __slots__ = ('name', 'arguments', 'keyword_arguments')
 
-  def __init__(self, name: str, *arguments: str):
+  def __init__(self, name: str, *arguments: str, **keyword_arguments):
     self.name = name
     self.arguments = arguments
+    self.keyword_arguments = keyword_arguments
 
   def __add__(self, other):
     return Expansion(self, other)
@@ -56,7 +57,12 @@ class Symbol(object):
   def __len__(self):
     return 1
 
-def symbol(name: str, *arguments: str | int | float):
+def symbol(name: str, *arguments: str | int | float, **kwargs: str | int | float):
+  return Symbol(name, *arguments, **kwargs)
+
+def definition(name: str, *arguments: str | int | float):
+  assert len(set(arguments)) == len(arguments), 'repeating arguments'
+
   return Symbol(name, *arguments)
 
 class Expansion(object):
@@ -118,48 +124,77 @@ def get_hash(assembly: Assembly, grammar: Grammar, seed_symbol: Symbol, debug: b
   return algo.hexdigest()
 
 def function_signature(signature: Symbol):
+  assert len(signature.keyword_arguments) == 0, 'a signature should not contain keyword arguments'
+
   if len(signature.arguments) > 0:
     arguments = ', '.join(f'int {arg}' for arg in signature.arguments)
     return (
       f'static int symgen_expand_{signature.name}'
-      f'(pcg32_random_t * rng, InstructionStack * instruction_stack, int depth, {arguments})'
+      f'(pcg32_random_t * rng, InstructionStack * instruction_stack, int depth, VariableSet input_set, {arguments})'
     )
   else:
     return (
       f'static int symgen_expand_{signature.name}'
-      f'(pcg32_random_t * rng, InstructionStack * instruction_stack, int depth)'
+      f'(pcg32_random_t * rng, InstructionStack * instruction_stack, int depth, VariableSet input_set)'
     )
+
+def match_arguments(invocation: Symbol, signature: Symbol, strict: bool=False):
+  arguments = dict()
+
+  for value, param in zip(invocation.arguments, signature.arguments):
+    if param in arguments:
+      raise ValueError(f'{param} is defined twice!')
+
+    arguments[param] = value
+
+  for param, value in invocation.keyword_arguments.items():
+    if param in arguments:
+      raise ValueError(f'{param} is defined twice!')
+
+    arguments[param] = value
+
+  missing_arguments = set(signature.arguments) - set(arguments.keys())
+
+  if strict and len(missing_arguments) > 0:
+    raise ValueError(f'the following arguments are missing: {missing_arguments}')
+
+  for k in missing_arguments:
+    arguments[k] = k
+
+  return [arguments[k] for k in signature.arguments]
 
 def function_invocation(
-  sym: Symbol, signature: Symbol, rng='rng', stack='instruction_stack', depth='depth - 1',
+  invocation: Symbol, signature: Symbol, rng='rng', stack='instruction_stack', depth='depth - 1',
+  input_set='input_set', memory_set='memory_set',
   strict: bool=False
 ):
-  if strict:
-    assert len(sym.arguments) == len(signature.arguments)
-    arguments = sym.arguments
-  else:
-    assert len(sym.arguments) <= len(signature.arguments)
-    arguments = (*sym.arguments, *signature.arguments[len(sym.arguments):])
+  kwargs = {kw: arg for kw, arg in invocation.keyword_arguments.items()}
+
+  ### special arguments
+  input_set = kwargs.pop('input_set', input_set)
+  depth = kwargs.pop('depth', depth)
+
+  arguments = match_arguments(invocation, signature, strict=strict)
 
   if len(arguments) > 0:
-    args = ', '.join(arg for arg in arguments)
+    args = ', '.join(str(arg) for arg in arguments)
     return (
-      f'symgen_expand_{sym.name} ({rng}, {stack}, {depth}, {args})'
+      f'symgen_expand_{invocation.name} ({rng}, {stack}, {depth}, {input_set}, {args})'
     )
   else:
     return (
-      f'symgen_expand_{sym.name} ({rng}, {stack}, {depth})'
+      f'symgen_expand_{invocation.name} ({rng}, {stack}, {depth}, {input_set})'
     )
 
 def push_instruction(assembly: Assembly, sym: Symbol):
   if len(sym.arguments) == 0:
-    arg = '.integer=0'
+    arg = '(arg_t) { .integer=0 }'
   elif len(sym.arguments) == 1:
     x, = sym.arguments
     if isinstance(x, float):
-      arg = f'.number={x}'
+      arg = f'(arg_t) {{ .number={x} }}'
     elif isinstance(x, int):
-      arg = f'.integer={x}'
+      arg = f'(arg_t) {{ .integer={x} }}'
     else:
       arg = str(x)
   else:
@@ -168,7 +203,7 @@ def push_instruction(assembly: Assembly, sym: Symbol):
   return (
     'push_instruction(\n'
     f'        instruction_stack,\n'
-    f'        (instruction_t) {{.command = {assembly.symbols[sym.name]}, .argument=(arg_t) {{ {arg} }}}}\n'
+    f'        (instruction_t) {{.command = {assembly.symbols[sym.name]}, .argument={arg} }}\n'
     f'      )'
   )
 
@@ -317,11 +352,15 @@ class GeneratorMachine(object):
       name='sym_gen', shared=shared, source=source
     )
 
-  def generate(self, seed_1: int, seed_2: int, max_depth: int=10, instruction_limit: int=1024, expression_limit: int=1024):
+  def generate(
+    self, seed_1: int, seed_2: int,
+    max_inputs: int=1, max_depth: int=10,
+    instruction_limit: int=1024, expression_limit: int=1024
+  ):
     instructions = np.ndarray(shape=(instruction_limit, 2), dtype=np.int32)
     instruction_sizes = np.ndarray(shape=(expression_limit, ), dtype=np.int32)
 
-    generated = self.machine.expr_gen(seed_1, seed_2, instructions, instruction_sizes, 1, max_depth)
+    generated = self.machine.expr_gen(seed_1, seed_2, instructions, instruction_sizes, max_inputs, max_depth)
 
     total = np.sum(instruction_sizes[:generated])
 
