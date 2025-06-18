@@ -14,24 +14,61 @@ SymGen generates C code for both evaluation and generation machines, compiles it
 shared library into the Python interpreter. While there is a certain overhead associated with execution of the stack
 machine, the execution speed is closer to C code than to pure Python alternatives.
 
-For example, evaluating an equivalent of `np.sum(x[:n] * x[n:])` on 64 points with `n=32` 16000 times yields:
-```
-SymGen: 0.235 seconds
-eval: 5.977 seconds
-eval (vectorized): 0.565 seconds
-NumPy: 0.049 seconds
-Binary (estimated): 0.025 seconds
-```
-where:
-- `eval` executes pre-compiled Python expression `x[0] * x[32] + x[1] * x[33] + ...` for each point;
-- `eval (vectorized)` vectorizes operations with numpy: `x[:, 0] * x[:, 32] + x[:, 1] * x[:, 33] + ...`;
-- `numpy`: `np.sum(x[:, :, :n] * x[:, :, n:], axis=2)`;
-- `Binary` is estimated for a 4 GFlops core (with fully inline code, e.g., fully unrolled loops).
+## Evaluation
 
-Note, that numpy gains a large speed-up due to repeating operations. Performance on arbitrary expressions is
-shown by the vectorized `eval`.
+## Assembly language
 
-## Why stack machines?
+SymGen uses [reverse Polish notation](https://en.wikipedia.org/wiki/Reverse_Polish_notation) for expressions.
+Instruction set of the machine comes from a library of operators, which can be easily extended with custom ones.
+```python
+import symgen
+machine = symgen.StackMachine(symgen.lib.core, symgen.lib.std)
+```
+All operators, except for the core ones, have unique name (typically 3-4 letters), like `add`, `mul`.
+Besides the names, core operators have special syntax:
+- `<float | integer>`, e.g., `1.0` --- `const` operator, pushes the constant into the stack;
+- `(<integer>)`, e.g., `(0)` --- `input` operator, pushes the expression's input variable into the stack (indexing starts with zero);
+- `[<integer>]`, e.g., `[1]` --- `memory` operator, pushes the content of the memory cell into the stack;
+- `{<integer>}`, e.g., `{3}` --- `store` operator, stores the top value from the stack into the memory cell,
+the value is removed from the stack.
+
+Below are some examples of expressions:
+```
+### adds 1 and 2
+1.0 2.0 add
+### incriments the first input variable
+(0) 1 add
+1 (0) add
+### x / (x + y)
+(0) (0) (1) add div
+### sqrt(x ** 2 + y ** 2)
+(0) (0) mul (1) (1) mul add sqrt
+### p(x) log p(x) where p(x) = 1 / sqrt(2 pi) exp(-x * x / 2) (the constant is precomputed)
+0.3989422804014327 2 (0) (0) mul div neg exp mul {0} [0] log [0] mul
+```
+
+### Internals
+
+When an instance of `StackMachine` is created, it generates a C files and compiles it into Python C extension.
+The resulting machine is specific to the instruction set and other settings.
+Internally the programs are represented as arrays of integer pairs: the first integer is the op code of the operation,
+the second one is argument of the operator (used mostly by the core operators).
+
+The binary code can be assembled and disassembled as follows:
+```python
+binary = machine.assembly.assemble('(0) (0) mul (1) (1) mul add sqrt')
+print(binary.T)
+# [[ 2  2  9  2  2  9  5 15]
+#  [ 0  0  0  1  1  0  0  0]]
+disassembled = machine.assembly.disassemble(binary)
+print(disassembled)
+# (0) (0) mul (1) (1) mul add sqrt
+```
+
+The assembly language is meant to be used mostly for introspection: the machine is designed to be used with
+generators that output binary code directly.
+
+### Why stack machines?
 
 Stack machines are nicely suited for symbolic expressions. Most of the mathematical expressions can be
 effortlessly converted into reverse Polish notation and executed on a stack machine: `(x + y) * z -> x y + z *`.
@@ -40,6 +77,82 @@ Naturally, reverse Polish notation is easy and intuitive to work with for genera
 While it is also possible to convert an expression into the format of RAM / register machines, they come with an additional
 hurdle of keeping track of memory / registers: one either has to compile reverse Polish notations into RAM / register machine code
 or directly generate such code.
+
+### Why mixed stack-memory machines?
+
+Stack machines have a flaw: they can't easily reuse results of subexpressions.
+For example, to compute `p(x) log p(x)` where `p(x)` is some probability density, one has to
+duplicate all computations for `p(x)`. Memory operators (`store` and `memory`, `{n}` and `[n]`) allow to
+introduce temporary variables into the expression: `<expression for p> {0} [0] log [0] mul`.
+An alternative solution, the stack duplication operator, is cumbersome to deal with during expression generation.
+
+## Sampling random expressions
+
+### Grammar
+
+SymGen uses (enhanced) context-free grammar for generating random expressions.
+A grammar extends instruction set (terminal symbols) with non-terminal symbols: each non-terminal symbol
+can be expanded into a combination of other non-terminal symbols and instructions according to a predefined
+transition table. For example, the following grammar generates random expressions with `add` and `mul` operators:
+```
+expr ->
+    expr expr add with probability = 0.2
+    expr expr mul with probability = 0.2
+    constant with probability = 0.6
+constant ->
+    0 with probability = 0.2
+    1 with probability = 0.2
+    2 with probability = 0.2
+    3.1415 with probability = 0.2
+    2.7182 with probability = 0.2
+```
+
+In SymGen this grammar can be defined as follows:
+```python
+import math
+import symgen
+from symgen.generator import Grammar, symbol
+
+libraries = (symgen.lib.core, symgen.lib.std)
+
+grammar = Grammar(
+  signatures=[symbol('expr'), symbol('constant')],
+  transitions={
+    symbol('expr'): {
+      symbol('expr') + symbol('expr') + symbol('add'): 0.2,
+      symbol('expr') + symbol('expr') + symbol('mul'): 0.2,
+      symbol('constant'): 0.6,
+    },
+    symbol('constant'): {
+      symbol('const', 0.0): 0.2,
+      symbol('const', 1.0): 0.2,
+      symbol('const', 2.0): 0.2,
+      symbol('const', math.pi): 0.2,
+      symbol('const', math.e): 0.2,
+    }
+  }
+)
+```
+Note, `const` is the name of the core operator.
+
+## A performance test
+
+For example, evaluating an equivalent of `np.sum(x[:n] * x[n:])` on 64 points with `n=32` 16000 times yields:
+```
+SymGen: 0.235 seconds
+eval: 5.977 seconds
+eval + numpy: 0.565 seconds
+NumPy: 0.049 seconds
+Binary (estimated): 0.025 seconds
+```
+where:
+- `eval` executes pre-compiled Python expression `x[0] * x[32] + x[1] * x[33] + ...` for each point;
+- `eval + numpy` vectorizes operations with numpy: `x[:, 0] * x[:, 32] + x[:, 1] * x[:, 33] + ...`;
+- `numpy`: `np.sum(x[:, :, :n] * x[:, :, n:], axis=2)`;
+- `Binary` is estimated for a 4 GFlops core (with fully inline code, e.g., fully unrolled loops).
+
+Note, that numpy gains a large speed-up due to repeating operations. Performance on arbitrary expressions is
+shown by the vectorized `eval`.
 
 
 

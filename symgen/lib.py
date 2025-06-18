@@ -25,6 +25,9 @@ std = dict(
   sub='const number_t a = pop(${stack});\n'
       'const number_t b = pop(${stack});\n'
       'a - b',
+  isub='const number_t a = pop(${stack});\n'
+       'const number_t b = pop(${stack});\n'
+       'b - a',
   neg='const number_t a = pop(${stack});\n'
       '-a',
   mul='const number_t a = pop(${stack});\n'
@@ -33,8 +36,17 @@ std = dict(
   div='const number_t a = pop(${stack});\n'
       'const number_t b = pop(${stack});\n'
       'a / b',
+  idiv='const number_t a = pop(${stack});\n'
+       'const number_t b = pop(${stack});\n'
+       'b / a',
   inv='const number_t a = pop(${stack});\n'
       '1 / a',
+  exp='const number_t a = pop(${stack});\n'
+      'exp(a)',
+  log='const number_t a = pop(${stack});\n'
+      'log(a)',
+  sqrt='const number_t a = pop(${stack});\n'
+       'sqrt(a)',
 )
 
 

@@ -370,6 +370,11 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
     return NULL;
   }
 
+  printf("!!!!!!\n");
+  printf("!!!!!!\n");
+  printf("!!!!!!\n");
+  printf("!!!!!!\n");
+
   const npy_intp max_expressions = PyArray_DIM(instruction_sizes_array, 0);
 
   instruction_t * instructions = (instruction_t *) PyArray_DATA(instructions_array);

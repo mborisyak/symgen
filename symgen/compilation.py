@@ -61,7 +61,7 @@ def ensure(generate, get_hash, name, shared: bytes | str | None=None, source: by
 
     if source is None:
       source_file = tempfile.NamedTemporaryFile(
-        'w', suffix=f'{code_hash}.c', prefix=f'{name}-', delete_on_close=False, delete=True
+        'w', suffix=f'{code_hash}.c', prefix=f'{name}-', delete=True
       )
       source = source_file.name
 
@@ -69,7 +69,7 @@ def ensure(generate, get_hash, name, shared: bytes | str | None=None, source: by
       f.write(code)
 
     if shared is None:
-      shared_file = tempfile.NamedTemporaryFile('w+b', suffix=f'{code_hash}.so', prefix=f'{name}-', delete_on_close=False)
+      shared_file = tempfile.NamedTemporaryFile('w+b', suffix=f'{code_hash}.so', prefix=f'{name}-', delete=True)
       shared = shared_file.name
 
     _ = compile(source, shared=shared)

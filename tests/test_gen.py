@@ -16,22 +16,40 @@ def test_gen():
     instructions[:m]
   )
 
-def test_gen_compile():
+def test_simple_grammar():
+  import math
+  import symgen
+  from symgen.generator import Grammar, symbol
+
   libraries = (symgen.lib.core, symgen.lib.std)
 
-  grammar = {
-    'expr': {
-      ('const', ): 3,
-      ('expr', 'expr', 'add'): 1,
-      ('expr', 'expr', 'mul'): 1,
+  grammar = Grammar(
+    signatures=[symbol('expr'), symbol('constant')],
+    transitions={
+      symbol('expr'): {
+        symbol('expr') + symbol('expr') + symbol('add'): 0.2,
+        symbol('expr') + symbol('expr') + symbol('mul'): 0.2,
+        symbol('constant'): 0.6,
+      },
+      symbol('constant'): {
+        symbol('const', 0.0): 0.2,
+        symbol('const', 1.0): 0.2,
+        symbol('const', 2.0): 0.2,
+        symbol('const', math.pi): 0.2,
+        symbol('const', math.e): 0.2,
+      }
     }
-  }
+  )
 
-  generator = symgen.GeneratorMachine(*libraries, grammar=grammar, seed_symbol='expr', source='sym_gen.c', debug=True)
-  print()
-  for i in range(10):
-    output = generator.generate(i, 3)
-    print(generator.assembly.disassemble(output))
+  generator = symgen.GeneratorMachine(
+    *libraries, grammar=grammar, seed_symbol=symbol('expr'), debug=True, source='sym_gen.c',
+  )
+
+  instructions, instruction_sizes = generator.generate(1234567, 765432, max_depth=10, instruction_limit=1024, expression_limit=16)
+  offset = 0
+  for s in instruction_sizes:
+    print(generator.assembly.disassemble(instructions[offset:offset + s]))
+    offset += s
 
 def test_grammar_hash():
   from symgen.generator import Grammar, symbol

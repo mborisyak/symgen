@@ -1,3 +1,5 @@
+import math
+
 import symgen
 import numpy as np
 
@@ -5,9 +7,25 @@ def test_eval():
   machine = symgen.StackMachine(
     symgen.lib.core, symgen.lib.std, debug=True
   )
-  result = machine.evaluate('(0) 1.5 add {0} [0] [0] mul', 1.0)
 
-  print(result)
+  def evaluate(expression, *args):
+    result = machine.evaluate(expression, *args)
+    if len(args) > 0:
+      arguments = ', '.join(f'({i}) = {x:.2f}' for i, x in enumerate(args))
+      print(f'{expression} = {result} where {arguments}')
+    else:
+      print(f'{expression} = {result}')
+    return result
+
+  evaluate('1.0 2.0 add')
+  evaluate('(0) 1.5 add {0} [0] [0] mul', 1.0)
+  evaluate('0.3989422804014327 2 (0) (0) mul div neg exp mul {0} [0] log [0] mul', 3.0)
+  evaluate('(0) (0) mul (1) (1) mul add sqrt', 3.0, 4.0)
+
+  binary = machine.assembly.assemble('(0) (0) mul (1) (1) mul add sqrt')
+  print(binary.T)
+  disassembled = machine.assembly.disassemble(binary)
+  print(disassembled)
 
 def test_expression():
   assembly = symgen.assembly.Assembly(symgen.lib.core, symgen.lib.std)
