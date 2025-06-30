@@ -1,5 +1,5 @@
-#ifndef SYMGEN
-#define SYMGEN
+#ifndef SYMGEN_H
+#define SYMGEN_H
 
 #define PY_SSIZE_T_CLEAN
 
@@ -7,8 +7,6 @@
 #include <stdio.h>
 #include <limits.h>
 #include <time.h>
-
-#include <Python.h>
 
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #include "numpy/arrayobject.h"
@@ -18,9 +16,6 @@
 
 typedef npy_int32 int_t;
 typedef npy_float32 number_t;
-
-typedef unsigned char byte;
-typedef unsigned int uint;
 
 typedef union {
   int_t integer;
@@ -32,4 +27,4 @@ typedef struct {
   arg_t argument;
 } instruction_t;
 
-#endif // define SYMGEN
+#endif // define SYMGEN_H

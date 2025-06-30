@@ -3,9 +3,32 @@ import math
 import symgen
 import numpy as np
 
+def test_name():
+  import re
+  def get_name(x: str):
+    name_re = re.compile(r'([^[]*\s+)?(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)(\s*\[.*])?\s*')
+    return name_re.fullmatch(x).group('name')
+
+  assert get_name('abc') == 'abc'
+  assert get_name('long _abc') == '_abc'
+  assert get_name('unsigned long _0abc') == '_0abc'
+  assert get_name('unsigned long * _0abc') == '_0abc'
+  assert get_name('unsigned long _0abc[]') == '_0abc'
+  assert get_name('unsigned long abc77[]') == 'abc77'
+  assert get_name('unsigned long abc77[5]') == 'abc77'
+  assert get_name('unsigned long abc78[onother array[6]]') == 'abc78'
+  assert get_name('unsigned long __[static 1024]') == '__'
+
+def test_normal():
+  u = np.random.uniform(size=(1024 * 1024, 10))
+  sigma = np.sqrt(1 / 12)
+  u = (np.sum(u, axis=-1) - 5) / np.sqrt(10) / sigma
+
+  print(np.mean(u), np.std(u))
+
 def test_eval():
   machine = symgen.StackMachine(
-    symgen.lib.core, symgen.lib.std, debug=True
+    symgen.lib.core, symgen.lib.std, debug=True, source='test_eval.c'
   )
 
   def evaluate(expression, *args):
@@ -17,15 +40,32 @@ def test_eval():
       print(f'{expression} = {result}')
     return result
 
-  evaluate('1.0 2.0 add')
-  evaluate('(0) 1.5 add {0} [0] [0] mul', 1.0)
+  assert abs(evaluate('1.0 2.0 add') - 3.0) < 1.0e-6
+  assert abs(evaluate('(0) 1.5 add {0} [0] [0] mul', 1.0) - 6.25) < 1.0e-6
   evaluate('0.3989422804014327 2 (0) (0) mul div neg exp mul {0} [0] log [0] mul', 3.0)
-  evaluate('(0) (0) mul (1) (1) mul add sqrt', 3.0, 4.0)
+  assert abs(evaluate('(0) (0) mul (1) (1) mul add sqrt', 3.0, 4.0) - 5.0) < 1.0e-6
+
+  assert abs(evaluate('1.0 2.0 div', ) - 2.0) < 1.0e-6
 
   binary = machine.assembly.assemble('(0) (0) mul (1) (1) mul add sqrt')
   print(binary.T)
   disassembled = machine.assembly.disassemble(binary)
   print(disassembled)
+
+  print()
+
+def test_execute():
+  from symgen import StackMachine, lib
+  machine = StackMachine(
+    lib.core, lib.std, debug=True, source='test_eval.c'
+  )
+  binary = machine.assembly.assemble('(0) (0) mul (1) (1) mul add sqrt (0) (1) add')
+  sizes = np.array([binary.shape[0]], dtype=np.int32)
+  inputs = np.arange(10, dtype=np.float32).reshape((1, 5, 2))
+  outputs = np.ndarray(shape=(1, 5, 2), dtype=np.float32)
+
+  machine.execute(binary, sizes, inputs, outputs)
+  print(outputs)
 
 def test_expression():
   assembly = symgen.assembly.Assembly(symgen.lib.core, symgen.lib.std)

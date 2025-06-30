@@ -4,4 +4,5 @@ from . import machine
 from . import generator
 
 from .machine import StackMachine
-from .generator import GeneratorMachine
+from .generator import GeneratorMachine, Grammar, symbol, op
+from . import grammars

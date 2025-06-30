@@ -13,7 +13,49 @@ CORE_OPERATORS: dict[str, str] = {
   'input': '({integer:d})',
   'memory': '[{integer:d}]',
   'store': '{{{integer:d}}}',
-  'const': '{value:f}'
+  'const': '{value:g}'
+}
+
+PRETTY_CORE_OPERATORS: dict[str, str] = {
+  'input': 'x_{integer:d}',
+  'memory': 'm_{integer:d}',
+  'store': 'm_{integer:d} :=',
+  'const': '{value:g}'
+}
+
+PRETTY_OPERATORS: dict[str, str] = {
+  'add': '({arg1} + {arg2})',
+  'mul': '{arg1} * {arg2}',
+  'sub': '({arg1} - {arg2})',
+  'div': '({arg1})/({arg2})',
+  'square': '{arg1}**2',
+  'cube': '{arg1}**3',
+  'exp': 'exp({arg1})',
+  'tanh': 'tanh({arg1})',
+  'sigmoid': 'sigma({arg1})',
+  'erf': 'erf({arg1})',
+  'neg': '(-{arg1})'
+}
+
+LATEX_CORE_OPERATORS: dict[str, str] = {
+  'input': 'x_{{{integer:d}}}',
+  'memory': 'm_{{{integer:d}}}',
+  'store': 'm_{{{integer:d}}} :=',
+  'const': '{value:g}'
+}
+
+LATEX_OPERATORS: dict[str, str] = {
+  'add': '\\left({arg1} + {arg2}\\right)',
+  'mul': '{arg1} * {arg2}',
+  'sub': '\\left({arg1} - {arg2}\\right)',
+  'div': '\\frac{{{arg1}}}{{{arg2}}}',
+  'square': '\\left({arg1}^2\\right)',
+  'cube': '\\left({arg1}^3\\right)',
+  'exp': '\\exp\\left({arg1}\\right)',
+  'tanh': '\\tanh\\left({arg1}\\right)',
+  'sigmoid': '\\sigma\\left({arg1}\\right)',
+  'erf': '\\mathrm{{erf}}\\left({arg1}\\right)',
+  'neg': '\\left(-{arg1}\\right)'
 }
 
 def merge(*libraries: dict[str, str]):
@@ -109,3 +151,43 @@ class Assembly(object):
         raise ValueError(f'unknown op code {op_code}')
 
     return ' '.join(operators)
+
+  def format(self, code: np.ndarray[np.int32], core_operators, operators):
+    arity = {
+      k: v.count('POP()')
+      for k, v in self.ops.items()
+    }
+
+    float_view = np.ndarray(shape=code.shape, dtype=np.float32, buffer=code)
+
+    stack = []
+    for i in range(code.shape[0]):
+      op_name = self.op_names[code[i, 0]]
+
+      if op_name in core_operators:
+        stack.append(
+          core_operators[op_name].format(value=float_view[i, 1], integer=code[i, 1])
+        )
+      else:
+        if op_name in operators:
+          arguments = {
+            f'arg{i + 1}': stack.pop()
+            for i in range(arity[op_name])
+          }
+          stack.append(operators[op_name].format(**arguments))
+        else:
+          arguments = ','.join([stack.pop() for _ in range(arity[op_name])])
+          stack.append(f'{op_name}({arguments})')
+
+    formatted = '; '.join(stack)
+    return formatted
+
+  def pretty(self, code: np.ndarray[np.int32]):
+    return self.format(code, PRETTY_CORE_OPERATORS, PRETTY_OPERATORS)
+
+  def latex(self, code: np.ndarray[np.int32]):
+    return self.format(code, LATEX_CORE_OPERATORS, LATEX_OPERATORS)
+
+
+
+

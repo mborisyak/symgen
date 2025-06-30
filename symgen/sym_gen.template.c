@@ -1,12 +1,7 @@
-#include "symgen.h"
-
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <limits.h>
-
-#include <Python.h>
-#include "numpy/arrayobject.h"
 
 // debug on / off
 ${DEBUG}
@@ -18,45 +13,22 @@ ${DEBUG}
     #define DEBUG_PRINT(fmt, ...)
 #endif
 
+#define BIT_SET_SIZE ${BIT_SET_SIZE}
+#define BITS 8
+
+#define MEMORY_LIMIT ${MEMORY_LIMIT}
+
+#include "symgen.h"
+#include "pcg32.h"
+#include "bitset.h"
+
+#include <Python.h>
+#include "numpy/arrayobject.h"
+
 #define STATUS_OK 0
 #define ERROR_STACK 1
 #define ERROR_MAX_DEPTH 2
 #define ERROR_UNPROCESSED_CONDITION 3
-
-// *Really* minimal PCG32 code / (c) 2014 M.E. O'Neill / pcg-random.org
-// Licensed under Apache License 2.0 (NO WARRANTY, etc. see website)
-
-typedef struct { uint64_t state;  uint64_t inc; } pcg32_random_t;
-
-static inline uint32_t pcg32_random_r(pcg32_random_t * rng);
-
-// Initialize the generator with seed and sequence
-static inline void pcg32_srandom(pcg32_random_t * rng, uint64_t initstate, uint64_t initseq) {
-    rng->state = 0U;
-    rng->inc = (initseq << 1u) | 1u;
-    pcg32_random_r(rng);
-    rng->state += initstate;
-    pcg32_random_r(rng);
-}
-
-static inline uint32_t pcg32_random_r(pcg32_random_t * rng) {
-    uint64_t oldstate = rng->state;
-    // Advance internal state
-    rng->state = oldstate * 6364136223846793005ULL + (rng->inc|1);
-    // Calculate output function (XSH RR), uses old state for max ILP
-    uint32_t xorshifted = ((oldstate >> 18u) ^ oldstate) >> 27u;
-    uint32_t rot = oldstate >> 59u;
-    return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
-}
-
-static inline double uniform(pcg32_random_t * rng) {
-  const long u = pcg32_random_r(rng);
-  return ((double) u) / 4294967295.0;
-}
-
-static inline number_t uniform_value(pcg32_random_t * rng) {
-  return (number_t) uniform(rng);
-}
 
 typedef struct {
   instruction_t * stack;
@@ -81,210 +53,52 @@ static inline instruction_t pop_instruction(InstructionStack * instruction_stack
   return element;
 }
 
-#define BIT_SET_SIZE 2
-#define BYTES 8
-
-typedef unsigned char bitmask_t;
-
-#define FULL_MASK (~((bitmask_t)0u))
-
-typedef struct {
-  bitmask_t bitset[BIT_SET_SIZE];
-  int size;
-} VariableSet;
-
-static inline void print_set(VariableSet var_set) {
-  for (int i = 0; i < BIT_SET_SIZE; ++i) {
-    for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
-      int value = (var_set.bitset[i] & (1u << j)) ? 1 : 0;
-      printf("%d ", value);
-    }
-    printf(" ");
-  }
-  printf("(size = %d)", var_set.size);
-}
-
-static inline int random_element(pcg32_random_t * rng, VariableSet var_set) {
-  uint32_t u = pcg32_random_r(rng);
-  uint32_t n = u % var_set.size;
-
-  #ifdef SYMGEN_DEBUG
-    printf("selecting %d (%d) from: ", n, u);
-    print_set(var_set);
-    printf("\n");
-  #endif
-
-  for (int i = 0; i < BIT_SET_SIZE; ++i) {
-    for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
-      if (var_set.bitset[i] & (1u << j)) {
-        if (n == 0) {
-
-          #ifdef SYMGEN_DEBUG
-            printf("selected %d\n", i * sizeof(bitmask_t) * BYTES + j);
-          #endif
-
-          return i * sizeof(bitmask_t) * BYTES + j;
-        } else {
-          --n;
-        }
-      }
-    }
-  }
-
-  return -1;
-}
-
-static inline unsigned int set_size(bitmask_t * bitset) {
-  int size = 0;
-
-  for (int i = 0; i < BIT_SET_SIZE; ++i) {
-    for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
-      if (bitset[i] & (1u << j)) {
-        ++size;
-      }
-    }
-  }
-
-  return size;
-}
-
-static inline VariableSet random_subset(pcg32_random_t * rng, VariableSet var_set) {
-  if (var_set.size == 0) {
-    return var_set;
-  }
-
-  VariableSet result;
-
-  for (int i = 0; i < BIT_SET_SIZE; ++i) {
-    const bitmask_t selection_mask = (bitmask_t) (pcg32_random_r(rng) % FULL_MASK);
-    result.bitset[i] = var_set.bitset[i] & selection_mask;
-  }
-
-  result.size = set_size(result.bitset);
-
-  return result;
-}
-
-static inline VariableSet random_subset_non_empty(pcg32_random_t * rng, VariableSet var_set) {
-  if (var_set.size == 0) {
-    return var_set;
-  }
-
-  VariableSet result;
-
-  for (int i = 0; i < BIT_SET_SIZE; ++i) {
-    const bitmask_t selection_mask = (bitmask_t) (pcg32_random_r(rng) % FULL_MASK);
-    result.bitset[i] = var_set.bitset[i] & selection_mask;
-  }
-
-  result.size = set_size(result.bitset);
-
-  if (result.size == 0) {
-    // rejecting sampling: there is 0.5 chance it succeeds
-    // setting a random element to 1 artificially lifts the prob of size 1 sets
-    return random_subset_non_empty(rng, var_set);
-  }
-
-  return result;
-}
-
-static inline VariableSet random_subset_p(pcg32_random_t * rng, VariableSet var_set, double p) {
-  if (var_set.size == 0) {
-    return var_set;
-  }
-
-  VariableSet result;
-
-  for (int i = 0; i < BIT_SET_SIZE; ++i) {
-    result.bitset[i] = 0u;
-
-    for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
-    const bitmask_t offset = (1u << j);
-      /// saving rng calls
-      if (var_set.bitset[i] & offset) {
-        const double u = uniform(rng);
-        result.bitset[i] |= (u < p) ? offset : 0u;
-      }
-    }
-  }
-
-  result.size = set_size(result.bitset);
-
-  return result;
-}
-
-static inline VariableSet random_subset_p_non_empty(pcg32_random_t * rng, VariableSet var_set, double p) {
-  if (var_set.size == 0) {
-    return var_set;
-  }
-
-  VariableSet result;
-
-  for (int i = 0; i < BIT_SET_SIZE; ++i) {
-    result.bitset[i] = 0u;
-
-    for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
-    const bitmask_t offset = (1u << j);
-      /// saving rng calls
-      if (var_set.bitset[i] & offset) {
-        const double u = uniform(rng);
-        result.bitset[i] |= (u < p) ? offset : 0u;
-      }
-    }
-  }
-
-  result.size = set_size(result.bitset);
-
-  if (result.size == 0) {
-    if (p > 0.25) {
-      return random_subset_p_non_empty(rng, var_set, p);
-    }
-
-    /// forcing one bit because rejection sampling might take a lot of iterations
-    uint32_t n = pcg32_random_r(rng) % var_set.size;
-    for (int i = 0; i < BIT_SET_SIZE; ++i) {
-      for (int j = 0; j < sizeof(bitmask_t) * BYTES; ++j) {
-        const bitmask_t offset = (1u << j);
-        if (var_set.bitset[i] & offset) {
-          if (n == 0) {
-            result.bitset[i] |= offset;
-            result.size = 1;
-            return result;
-          } else {
-            --n;
-          }
-        }
-      }
-    }
-  }
-
-  return result;
-}
-
-static inline VariableSet variable_set_full(int n) {
-  VariableSet var_set;
-
-  int i;
-  for (i = 0; i < n / (sizeof(bitmask_t) * BYTES); ++i) {
-    var_set.bitset[i] = FULL_MASK;
-  }
-  const int offset = n % (sizeof(bitmask_t) * BYTES);
-  var_set.bitset[i] = ~(FULL_MASK << offset);
-
-  for (++i; i < BIT_SET_SIZE; ++i) {
-    var_set.bitset[i] = 0;
-  }
-  var_set.size = n;
-
-  return var_set;
-}
-
 // defines
 ${DEFINES}
 
-#define RANDOM_SUBSET_P(prob) (random_subset_p(rng, input_set, prob))
-#define RANDOM_SUBSET (random_subset(rng, input_set))
-#define RANDOM_INPUT (random_element(rng, input_set))
+#define RANDOM_INPUT() (bitset_random_element(rng, domain))
+
+#define DOMAIN_RANDOM_SUBSET() (bitset_random_subset(rng, domain))
+#define DOMAIN_RANDOM_SUBSET_P(prob) (bitset_random_subset_p(rng, domain, prob))
+#define DOMAIN_RANDOM_CHOICE(n) (bitset_random_choice(rng, domain, n))
+#define DOMAIN_RANDOM_FRACTION(fraction) (bitset_random_choice_fraction(rng, domain, fraction))
+
+#define RANGE(start, end) (bitset_range(start, end))
+
+#define RANDOM_ELEMENT(bitset) (bitset_random_element(rng, bitset))
+
+#define RANDOM_SUBSET(bitset) (bitset_random_subset(rng, bitset))
+#define RANDOM_SUBSET_P(bitset, prob) (bitset_random_subset_p(rng, bitset, prob))
+#define RANDOM_CHOICE(bitset, n) (bitset_random_choice(rng, bitset, n))
+#define RANDOM_FRACTION(bitset, fraction) (bitset_random_choice_fraction(rng, bitset, fraction))
+
+#define RANDOM_NORMAL() (pcg32_normal(rng))
+
+static inline unsigned int random_memory(pcg32_random_t * rng, const unsigned int * allocated) {
+  const unsigned int limit = *allocated;
+  if (limit == 0) {
+    DEBUG_PRINT("ERROR: accessing empty memory");
+    return 0;
+  }
+
+  return pcg32_random_r(rng) % limit;
+}
+
+static inline unsigned int random_memory_range(
+  pcg32_random_t * rng, const unsigned int start, const unsigned int end
+) {
+  const unsigned int limit = end - start;
+  if (limit <= 0) {
+    DEBUG_PRINT("ERROR: empty range for random memory");
+    return start;
+  }
+
+  return start + (pcg32_random_r(rng) % limit);
+}
+
+#define ALLOCATE() (allocate(allocated))
+#define RANDOM_MEMORY() (random_memory(rng, allocated))
+#define RANDOM_MEMORY_RANGE(start, end) (random_memory_range(rng, start, end))
 
 ${DECLARATIONS}
 
@@ -297,11 +111,12 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
   PyObject *py_instruction_sizes = NULL;
   PyObject *py_max_inputs = NULL;
   PyObject *py_max_depth = NULL;
+  PyObject *py_max_expression_length = NULL;
 
   if (!PyArg_UnpackTuple(
-    args, "expr_gen", 6, 6,
+    args, "expr_gen", 7, 7,
     &py_seed_1, &py_seed_2, &py_instructions, &py_instruction_sizes,
-    &py_max_inputs, &py_max_depth
+    &py_max_inputs, &py_max_depth, &py_max_expression_length
   )) {
     return NULL;
   }
@@ -338,12 +153,18 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
     return NULL;
   }
 
+  if (!PyLong_Check(py_max_expression_length)) {
+    PyErr_SetString(PyExc_TypeError, "max_expression_length must be an integer.");
+    return NULL;
+  }
+
   const PyArrayObject * instructions_array = (PyArrayObject *) py_instructions;
   const PyArrayObject * instruction_sizes_array = (PyArrayObject *) py_instruction_sizes;
   const long max_inputs = PyLong_AsLong(py_max_inputs);
   const long max_depth =  PyLong_AsLong(py_max_depth);
+  const long max_expression_length = PyLong_AsLong(py_max_expression_length);
 
-  if (max_inputs > sizeof(bitmask_t) * BYTES * BIT_SET_SIZE) {
+  if (max_inputs > sizeof(bitmask_t) * BITS * BIT_SET_SIZE) {
     PyErr_SetString(
       PyExc_TypeError, "Max inputs exceeds maximal number of inputs. Recompile the machine with a larger limit."
     );
@@ -370,11 +191,6 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
     return NULL;
   }
 
-  printf("!!!!!!\n");
-  printf("!!!!!!\n");
-  printf("!!!!!!\n");
-  printf("!!!!!!\n");
-
   const npy_intp max_expressions = PyArray_DIM(instruction_sizes_array, 0);
 
   instruction_t * instructions = (instruction_t *) PyArray_DATA(instructions_array);
@@ -387,14 +203,17 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
 
   //Py_BEGIN_ALLOW_THREADS
 
-  InstructionStack instruction_stack = (InstructionStack) {
-    .stack=instructions, .empty=instructions, .full=instructions_end
-  };
-  VariableSet input_set = variable_set_full(max_inputs);
-
   int expression_index = 0;
-  while (instruction_stack.stack < instruction_stack.full && expression_index < max_expressions) {
-    const instruction_t * beginning = instruction_stack.stack;
+  int instruction_index = 0;
+  const BitSet all_variables = bitset_full(max_inputs);
+
+  while ((instruction_index + max_expression_length <= max_instructions) && (expression_index < max_expressions)) {
+    InstructionStack instruction_stack = (InstructionStack) {
+      .stack=instructions + instruction_index,
+      .empty=instructions + instruction_index,
+      .full=instructions + instruction_index + max_expression_length
+    };
+
     const int status = ${SEED_SYMBOL};
 
     //Py_END_ALLOW_THREADS
@@ -402,27 +221,29 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
     if (status != STATUS_OK) {
       switch (status) {
         case ERROR_STACK:
-          DEBUG_PRINT("Maximal stack size reached\n");
-          instruction_stack.stack = beginning;
-          break;
+          PyErr_SetString(PyExc_ValueError, "Maximal stack size.");
+          return NULL;
 
         case ERROR_MAX_DEPTH:
-          DEBUG_PRINT("Maximal expression depth reached\n");
-          instruction_stack.stack = beginning;
-          continue;
+          PyErr_SetString(PyExc_ValueError, "Maximal depth is reached.");
+          return NULL;
 
         case ERROR_UNPROCESSED_CONDITION:
-          PyErr_SetString(PyExc_TypeError, "The state didn't satisfy any conditions.");
+          PyErr_SetString(PyExc_ValueError, "The state didn't satisfy any conditions.");
           return NULL;
 
         default:
-          PyErr_SetString(PyExc_TypeError, "Generation failed: unknown reason.");
+          PyErr_SetString(PyExc_ValueError, "Generation failed: unknown reason.");
           return NULL;
       }
-    } else {
-      instruction_sizes[expression_index] = (int) (instruction_stack.stack - beginning);
-      ++expression_index;
     }
+
+    const unsigned int generated_instructions = (unsigned int) (instruction_stack.stack - instruction_stack.empty);
+    DEBUG_PRINT("Generated %d instructions (expression %d)\n", generated_instructions, expression_index);
+
+    instruction_sizes[expression_index] = generated_instructions;
+    instruction_index += generated_instructions;
+    ++expression_index;
   }
 
   const int generated = expression_index;

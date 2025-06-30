@@ -4,6 +4,7 @@
 
 #include <Python.h>
 #include "numpy/arrayobject.h"
+#include "stable.h"
 
 // debug on / off
 ${DEBUG}
@@ -30,6 +31,9 @@ static inline void push(number_t ** stack, number_t element) {
   DEBUG_PRINT("[DEBUG] push %f\n", element);
   (*stack)++;
 }
+
+#define POP() (pop(stack))
+#define PUSH(x) (push(stack, x))
 
 // op code constants
 ${DEFINES}
@@ -98,7 +102,6 @@ static PyObject * stack_eval(PyObject *self, PyObject *args) {
   const npy_intp n_batch = PyArray_DIM(instruction_sizes_array, 0);
 
   if (!(
-    PyArray_IS_C_CONTIGUOUS(inputs_array) &&
     PyArray_TYPE(inputs_array) == NUMBER_T &&
     PyArray_NDIM(inputs_array) == 3 &&
     PyArray_DIM(inputs_array, 0) == n_batch

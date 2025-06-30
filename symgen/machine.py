@@ -80,7 +80,7 @@ def generate(library: Assembly, max_stack_size: int=1024, debug: bool=False):
 
     definitions = ''.join(f'  {line}\n' for line in definitions)
 
-    if 'return' in return_expression or 'return;' in return_expression:
+    if 'return' in return_expression:
       if not return_expression.endswith(';'):
         return_expression = f'{return_expression};'
       commands[k] = (f'static inline void {function_name}({signature}) {{\n'
