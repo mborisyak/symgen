@@ -13,14 +13,16 @@ CORE_OPERATORS: dict[str, str] = {
   'input': '({integer:d})',
   'memory': '[{integer:d}]',
   'store': '{{{integer:d}}}',
-  'const': '{value:g}'
+  'const': '{value:g}',
+  'integer': '{value:d}',
 }
 
 PRETTY_CORE_OPERATORS: dict[str, str] = {
   'input': 'x_{integer:d}',
   'memory': 'm_{integer:d}',
   'store': 'm_{integer:d} :=',
-  'const': '{value:g}'
+  'const': '{value:g}',
+  'integer': '{value:d}'
 }
 
 PRETTY_OPERATORS: dict[str, str] = {
@@ -93,6 +95,8 @@ class Assembly(object):
       self.op_codes[k]: k
       for k in CORE_OPERATORS
     }
+
+    self.core_ops = set(CORE_OPERATORS)
 
   def __repr__(self):
     return '\n\n'.join(

@@ -31,23 +31,26 @@ static inline uint32_t pcg32_random_r(pcg32_random_t * rng) {
 
 static inline double pcg32_uniform(pcg32_random_t * rng) {
   const long u = pcg32_random_r(rng);
-  return ((double) u) / 4294967295;
+
+  /// maximal value is 1 greater than max uint32 to ensure it is never 1.0 exactly.
+  return ((double) u) / 4294967296L;
 }
 
 static inline number_t pcg32_uniform_value(pcg32_random_t * rng) {
   return (number_t) pcg32_uniform(rng);
 }
 
-static inline number_t pcg32_normal(pcg32_random_t * rng) {
-  double u = 0.0;
+static inline number_t pcg32_normal_value(pcg32_random_t * rng) {
   const int n = 10;
   const double mean = n / 2;
-  const double norm = sqrt(n / 12);
+  const double norm = sqrt(12 / n);
+
+  double u = 0.0;
   for (int i = 0; i < n; ++i) {
     u += pcg32_uniform(rng);
   }
 
-  return (u - mean) / norm;
+  return (u - mean) * norm;
 }
 
 #endif

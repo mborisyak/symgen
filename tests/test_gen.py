@@ -282,7 +282,7 @@ def test_grammar_hash():
   )
 
   instructions, instruction_sizes = generator.generate(
-    1234567, 765432, max_depth=10, instruction_limit=1024, expression_limit=8, max_inputs=2
+    1234567, 765432, max_depth=10, instruction_limit=1024, expression_limit=8, max_inputs=2,
   )
   print(instructions)
   print(instruction_sizes)
@@ -386,3 +386,44 @@ def test_tmp():
 
   with open(file.name, 'w') as f:
     f.write('Hello!')
+
+def test_arity():
+  libraries = (symgen.lib.core, symgen.lib.std)
+  assembly = symgen.assembly.Assembly(*libraries)
+
+  arities = {
+    op_name: code.count('POP()')
+    for op_name, code in assembly.ops.items()
+  }
+
+  code = ['const', 'const', 'add', 'const', 'add', 'const', 'const', 'add', 'mul']
+  print()
+  print(' '.join(code))
+
+  lens = []
+  for op in code:
+    n = arities[op]
+    l = 0
+    for j in range(n):
+      l += lens[len(lens) - l - 1]
+
+    if op == 'store':
+      pass
+    else:
+      l += 1
+
+    lens.append(l)
+
+  print(' '.join(str(l) for l in lens))
+
+  for i, op in enumerate(code):
+    n = arities[op]
+    l = 0
+    args = []
+    for j in range(n):
+      arg_len = lens[i - l - 1]
+      arg = code[i - l - arg_len : i - l]
+      args.append(arg)
+      l += arg_len
+
+    print(op, ', '.join([' '.join(arg) for arg in args]))

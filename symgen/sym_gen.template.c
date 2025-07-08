@@ -21,6 +21,7 @@ ${DEBUG}
 #include "symgen.h"
 #include "pcg32.h"
 #include "bitset.h"
+#include "stable.h"
 
 #include <Python.h>
 #include "numpy/arrayobject.h"
@@ -31,32 +32,62 @@ ${DEBUG}
 #define ERROR_UNPROCESSED_CONDITION 3
 
 typedef struct {
-  instruction_t * stack;
-  instruction_t * empty;
-  instruction_t * full;
+  instruction_t * instructions;
+  unsigned int * expression_sizes;
+  unsigned int ** expression_arguments;
+  number_t * inputs;
+  number_t * memory;
+  number_t * trace;
+
+  unsigned int index;
+  unsigned int capacity;
+  unsigned int n_samples;
 } InstructionStack;
-
-static inline int push_instruction(InstructionStack * instruction_stack, instruction_t element) {
-  if (instruction_stack->stack < instruction_stack->full) {
-    DEBUG_PRINT("PUSH! %d\n", element.command);
-    *(instruction_stack->stack) = element;
-    ++(instruction_stack->stack);
-    return STATUS_OK;
-  } else {
-    return ERROR_STACK;
-  }
-}
-
-static inline instruction_t pop_instruction(InstructionStack * instruction_stack) {
-  --(instruction_stack->stack);
-  const instruction_t element = *(instruction_stack->stack);
-  return element;
-}
 
 // defines
 ${DEFINES}
 
-#define RANDOM_INPUT() (bitset_random_element(rng, domain))
+// ops
+${OPS}
+
+#define MAX_ARITY ${MAX_ARITY}
+
+// arities
+${ARITIES}
+
+// push
+${NUMBER_OF_OUTPUTS}
+
+${COMMON_OP_TYPE}
+
+${OP_TABLE}
+
+static inline int push_instruction(instruction_t instruction, InstructionStack * stack) {
+  if (stack->index >= stack->capacity) {
+    return ERROR_STACK;
+  }
+
+  DEBUG_PRINT("PUSH! %d\n", instruction.command);
+  stack->instructions[stack->index] = instruction;
+
+  int l = 0;
+  for (int i = 0; i < arities[instruction.command]; ++i) {
+    const int jump = stack->index - l - 1;
+    stack->expression_arguments[stack->index][i] = jump;
+    l += stack->expression_sizes[jump];
+  }
+  stack->expression_sizes[stack->index] = l + 1;
+
+  ops[instruction.command](instruction.argument, )
+
+  DEBUG_PRINT("size computed as %d\n", l);
+
+  stack->index++;
+
+  return STATUS_OK;
+}
+
+#define RANDOM_INPUT() (arg_t) { .integer=(bitset_random_element(rng, domain)) }
 
 #define DOMAIN_RANDOM_SUBSET() (bitset_random_subset(rng, domain))
 #define DOMAIN_RANDOM_SUBSET_P(prob) (bitset_random_subset_p(rng, domain, prob))
@@ -72,7 +103,8 @@ ${DEFINES}
 #define RANDOM_CHOICE(bitset, n) (bitset_random_choice(rng, bitset, n))
 #define RANDOM_FRACTION(bitset, fraction) (bitset_random_choice_fraction(rng, bitset, fraction))
 
-#define RANDOM_NORMAL() (pcg32_normal(rng))
+#define RANDOM_NORMAL() (pcg32_normal_value(rng))
+#define RANDOM_LOG_NORMAL() (exp(pcg32_normal_value(rng)))
 
 static inline unsigned int random_memory(pcg32_random_t * rng, const unsigned int * allocated) {
   const unsigned int limit = *allocated;
@@ -113,10 +145,14 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
   PyObject *py_max_depth = NULL;
   PyObject *py_max_expression_length = NULL;
 
+  PyObject *py_trace_sample = NULL;
+  PyObject *py_trace_buffer = NULL;
+
   if (!PyArg_UnpackTuple(
-    args, "expr_gen", 7, 7,
+    args, "expr_gen", 9, 9,
     &py_seed_1, &py_seed_2, &py_instructions, &py_instruction_sizes,
-    &py_max_inputs, &py_max_depth, &py_max_expression_length
+    &py_max_inputs, &py_max_depth, &py_max_expression_length,
+    &py_trace_sample, &py_trace_buffer
   )) {
     return NULL;
   }
@@ -143,11 +179,19 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
     PyErr_SetString(PyExc_TypeError, "instruction_sizes must be a numpy array.");
     return NULL;
   }
+  if (!PyArray_Check(py_trace_sample)) {
+    PyErr_SetString(PyExc_TypeError, "trace_samples must be a numpy array.");
+    return NULL;
+  }
+  if (!PyArray_Check(py_trace_buffer)) {
+    PyErr_SetString(PyExc_TypeError, "trace_buffer must be a numpy array.");
+    return NULL;
+  }
+
   if (!PyLong_Check(py_max_inputs)) {
     PyErr_SetString(PyExc_TypeError, "max_inputs must be an integer.");
     return NULL;
   }
-
   if (!PyLong_Check(py_max_depth)) {
     PyErr_SetString(PyExc_TypeError, "max_depth must be an integer.");
     return NULL;
@@ -160,13 +204,16 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
 
   const PyArrayObject * instructions_array = (PyArrayObject *) py_instructions;
   const PyArrayObject * instruction_sizes_array = (PyArrayObject *) py_instruction_sizes;
+  const PyArrayObject * trace_sample_array = (PyArrayObject *) py_trace_sample;
+  const PyArrayObject * trace_buffer_array = (PyArrayObject *) py_trace_buffer;
+
   const long max_inputs = PyLong_AsLong(py_max_inputs);
   const long max_depth =  PyLong_AsLong(py_max_depth);
   const long max_expression_length = PyLong_AsLong(py_max_expression_length);
 
   if (max_inputs > sizeof(bitmask_t) * BITS * BIT_SET_SIZE) {
     PyErr_SetString(
-      PyExc_TypeError, "Max inputs exceeds maximal number of inputs. Recompile the machine with a larger limit."
+      PyExc_TypeError, "`max_inputs` exceeds maximal number of inputs. Recompile the machine with a larger limit."
     );
     return NULL;
   }
@@ -190,16 +237,47 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
     PyErr_SetString(PyExc_TypeError, "Instruction sizes must be a (n_batch, ) int32 array.");
     return NULL;
   }
-
   const npy_intp max_expressions = PyArray_DIM(instruction_sizes_array, 0);
 
-  instruction_t * instructions = (instruction_t *) PyArray_DATA(instructions_array);
-  instruction_t * instructions_end = instructions + 2 * max_instructions;
+  if (!(
+    PyArray_IS_C_CONTIGUOUS(trace_sample_array) &&
+    (PyArray_TYPE(trace_sample_array) == NUMBER_T) &&
+    (PyArray_NDIM(trace_sample_array) == 2) &&
+    (PyArray_DIM(trace_sample_array, 0) == max_inputs)
+  )) {
+    PyErr_SetString(PyExc_TypeError, "trace_sample must be a (max_inputs, num_trace_samples) float32 array.");
+    return NULL;
+  }
+  const npy_intp num_trace_samples = PyArray_DIM(trace_sample_array, 1);
 
+  if (!(
+    PyArray_IS_C_CONTIGUOUS(trace_buffer_array) &&
+    (PyArray_TYPE(trace_buffer_array) == NUMBER_T) &&
+    (PyArray_NDIM(trace_buffer_array) == 2) &&
+    (PyArray_DIM(trace_buffer_array, 0) == max_instructions) &&
+    (PyArray_DIM(trace_buffer_array, 1) == num_trace_samples)
+  )) {
+    PyErr_SetString(PyExc_TypeError, "trace_buffer must be a (max_instructions, num_trace_samples) float32 array.");
+    return NULL;
+  }
+
+  instruction_t * instructions = (instruction_t *) PyArray_DATA(instructions_array);
   int_t * instruction_sizes = (int_t *) PyArray_DATA(instruction_sizes_array);
-  int_t * instruction_sizes_end = instruction_sizes + 2 * max_expressions;
 
   const npy_intp instructions_stride_0 = PyArray_STRIDE(instructions_array, 0) / sizeof(int_t);
+
+  const number_t * trace_samples = (number_t *) PyArray_DATA(trace_sample_array);
+  number_t * trace_buffer = (number_t *) PyArray_DATA(trace_buffer_array);
+
+  unsigned int expression_sizes_buffer[max_expression_length];
+  unsigned int expression_arguments_buffer[max_expression_length * MAX_ARITY];
+  unsigned int * expression_arguments[max_expression_length];
+
+  for (int i = 0; i < max_expression_length; ++i) {
+    expression_arguments[i] = expression_arguments_buffer + i * MAX_ARITY;
+  }
+
+  number_t memory_buffer[max_expression_length * num_trace_samples];
 
   //Py_BEGIN_ALLOW_THREADS
 
@@ -208,10 +286,16 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
   const BitSet all_variables = bitset_full(max_inputs);
 
   while ((instruction_index + max_expression_length <= max_instructions) && (expression_index < max_expressions)) {
-    InstructionStack instruction_stack = (InstructionStack) {
-      .stack=instructions + instruction_index,
-      .empty=instructions + instruction_index,
-      .full=instructions + instruction_index + max_expression_length
+    InstructionStack stack = (InstructionStack) {
+      .instructions=instructions + instruction_index,
+      .expression_sizes=expression_sizes_buffer,
+      .expression_arguments=expression_arguments,
+      .trace=trace_buffer + instruction_index * num_trace_samples,
+      .memory=memory_buffer,
+
+      .index=0,
+      .capacity=max_expression_length,
+      .n_samples=num_trace_samples
     };
 
     const int status = ${SEED_SYMBOL};
@@ -238,7 +322,7 @@ static PyObject * expr_gen(PyObject *self, PyObject *args) {
       }
     }
 
-    const unsigned int generated_instructions = (unsigned int) (instruction_stack.stack - instruction_stack.empty);
+    const unsigned int generated_instructions = stack.index;
     DEBUG_PRINT("Generated %d instructions (expression %d)\n", generated_instructions, expression_index);
 
     instruction_sizes[expression_index] = generated_instructions;

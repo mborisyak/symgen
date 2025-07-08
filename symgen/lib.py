@@ -10,9 +10,9 @@ __all__ = [
 core = dict(
   const='${argument}.number',
   integer='(number_t) ${argument}.integer',
-  input='${input}[${argument}.integer]',
-  memory='${memory}[${argument}.integer]',
-  store='${memory}[${argument}.integer] = pop(${stack});\n'
+  input='${input}',
+  memory='${memory}',
+  store='${memory} = POP();\n'
         'return;',
 )
 
@@ -92,17 +92,17 @@ stable = dict(
     'const number_t w = POP();\n'
     '(n + w * p - w * MEAN_LOG_NORMAL) / sqrt(1 + w * w * VAR_LOG_NORMAL)'
   ),
-  nadd_p_p_1_w=(
+  nadd_p_p_1_c=(
     'const number_t p1 = POP();\n'
     'const number_t p2 = POP();\n'
-    'const number_t w2 = POP();\n'
-    '(p1 + w2 * p2 - (1 + w2) * MEAN_LOG_NORMAL) / STD_LOG_NORMAL / sqrt(1 + w2 * w2)'
+    'const number_t c = POP();\n'
+    '(p1 + c * p2 - (1 + c) * MEAN_LOG_NORMAL) / STD_LOG_NORMAL / sqrt(1 + c * c)'
   ),
-  padd_p_p_1_w=(
+  padd_p_p_1_c=(
     'const number_t p1 = POP();\n'
     'const number_t p2 = POP();\n'
-    'const number_t w2 = POP();\n'
-    '(p1 + w2 * p2) / (1 + w2)'
+    'const number_t c = POP();\n'
+    '(p1 + c * p2) / (1 + c)'
   ),
   nmul_n_n=(
     'const number_t n1 = POP();\n'
@@ -171,7 +171,33 @@ stable = dict(
     'const number_t c = POP();\n'
     'pinv_p_c(p, c)'
   ),
+  ndiv_n_p_c=(
+    'const number_t n = POP();\n'
+    'const number_t p = POP();\n'
+    'const number_t c = POP();\n'
+    'ndiv_n_p_c(n, p, c)'
+  ),
+  psquare_n_c=(
+    'const number_t n = POP();\n'
+    'const number_t c = POP();\n'
+    '(n + c) * (n + c) * MEAN_LOG_NORMAL / (1 + c * c)'
+  ),
+  psqrt_p_c=(
+    'const number_t p = POP();\n'
+    'const number_t c = POP();\n'
+    'psqrt_p_c(p, c)'
+  ),
+  ntanh_n_c=(
+    'const number_t n = POP();\n'
+    'const number_t c = POP();\n'
+    'ntanh_n_c(n, c)'
+  ),
 
+  nlog_p_c=(
+    'const number_t n = POP();\n'
+    'const number_t c = POP();\n'
+    'nlog_p_c(n, c)'
+  ),
 )
 
 

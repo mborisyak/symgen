@@ -83,10 +83,6 @@ def test_ops():
     return x1 / (x2 + a) / std
 
   def psqrt_p_cp(x, a):
-    w1, w2 = -0.50227822, 0.21172428
-    std = np.exp(
-      -0.5 * np.log1p(a) + w1 * np.exp(-w2 * a)
-    )
     w0, w1, w2, w3 = -0.23253458, 1., 0.342227, 5.
     mean = np.exp(
       w0 - 0.5 * np.log1p(a) + w2 * np.exp(-w3 * a)
@@ -152,7 +148,8 @@ def test_ops():
     psquare_n_c = lambda x, c: np.square(x + c) * mean_log_normal / (1 + c ** 2),
     psquare_p_cp = psquare_p_cp,
     ntanh_n_c = ntanh_n_c,
-    nlog_p_cp=nlog_p_cp
+    nlog_p_cp=nlog_p_cp,
+    psqrt_p_cp=psqrt_p_cp
   )
 
   samples = dict()
@@ -234,8 +231,8 @@ def test_machine():
     padd_p_p='p=pp',
     nadd_n_n_1_c='n=nnc',
     nadd_n_p_1_c='n=npc',
-    nadd_p_p_1_w='n=ppc',
-    padd_p_p_1_w='p=pp+',
+    nadd_p_p_1_c='n=ppc',
+    padd_p_p_1_c='p=pp+',
     nmul_n_n='n=nn',
     nmul_n_p='n=np',
     nmul_p_p='n=pp',
@@ -245,6 +242,11 @@ def test_machine():
     nmul_p_p_c_c='n=ppcc',
     pmul_p_p_c_c='p=pp++',
     pinv_p_c='p=p+',
+    ndiv_n_p_c='n=np+',
+    psquare_n_c='p=nc',
+    ntanh_n_c='n=nc',
+    nlog_p_c='n=p+',
+    psqrt_p_c='p=p+'
   )
 
   mean_log_normal = np.exp(0.5)

@@ -3,7 +3,7 @@ import os
 ROOT = os.path.dirname(__file__)
 
 LIB_FLAGS = ['--shared', '-fPIC']
-OPT_FLAGS = ['-O3', '-march=native', '-mtune=native']
+OPT_FLAGS = ['-O3', '-march=native', '-mtune=native', '-Wall']
 #OPT_FLAGS = ['-O2']
 
 __all__ = [
@@ -12,7 +12,7 @@ __all__ = [
   'ensure'
 ]
 
-def compile(source_file: str, shared: bytes | str):
+def compile(source_file: str, shared: bytes | str, warn: bool=True):
   import sysconfig
   import subprocess as sp
 
@@ -42,6 +42,13 @@ def compile(source_file: str, shared: bytes | str):
     print('===== stderr =====')
     print(stderr.decode('utf-8'))
     raise Exception('Compilation failed')
+  elif warn:
+    print('===== arguments =====')
+    print(' '.join(call_arguments))
+    print('===== stdout =====')
+    print(stdout.decode('utf-8'))
+    print('===== stderr =====')
+    print(stderr.decode('utf-8'))
 
   return shared
 

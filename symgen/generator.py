@@ -20,6 +20,8 @@ KEYWORDS = {
 
 BRANCHING_VARIABLE = '_branching_random'
 CUMULATIVE_VARIABLE = '_cumulative'
+TOTAL_LIKELIHOOD_VARIABLE = '_likelihood'
+CONDITION_VARIABLE = '_condition'
 BITS_IN_BYTE = 8
 
 __all__ = [
@@ -340,14 +342,12 @@ def function_signature(signature: Symbol):
 
     return (
       f'static int symgen_expand_{signature.name}'
-      f'(pcg32_random_t * rng, InstructionStack * instruction_stack, '
-      f'const int depth, const BitSet domain, {arguments})'
+      f'(pcg32_random_t * rng, InstructionStack * stack, const int depth, const BitSet domain, {arguments})'
     )
   else:
     return (
       f'static int symgen_expand_{signature.name}'
-      f'(pcg32_random_t * rng, InstructionStack * instruction_stack, '
-      f'const int depth, const BitSet domain)'
+      f'(pcg32_random_t * rng, InstructionStack * stack, const int depth, const BitSet domain)'
     )
 
 def match_arguments(invocation: Invocation, scope: Symbol | None=None):
@@ -387,8 +387,7 @@ def match_arguments(invocation: Invocation, scope: Symbol | None=None):
   return [arguments[k] for k in signature.argument_names]
 
 def function_invocation(
-  invocation: Invocation, scope: Symbol | None=None,
-  rng='rng', stack='instruction_stack', depth='depth - 1', domain='domain'
+  invocation: Invocation, scope: Symbol | None=None, rng='rng', stack='stack', depth='depth - 1', domain='domain',
 ):
   ### special arguments
   depth = depth if invocation.depth is None else invocation.depth
@@ -435,115 +434,187 @@ def push_instruction(assembly: Assembly, instruction: Invocation):
 
   return (
     'push_instruction(\n'
-    f'        instruction_stack,\n'
-    f'        (instruction_t) {{.command = {assembly.symbols[instruction.definition.name]}, .argument={arg} }}\n'
+    f'        (instruction_t) {{.command = {assembly.symbols[instruction.definition.name]}, .argument={arg} }},\n'
+    f'        stack\n'
     f'      )'
   )
 
-def generate_function(signature: Symbol, rules: dict[Condition, TransitionTable], assembly: Assembly):
-  bodies = list()
+def generate_expansion(expansion: Expansion, scope: Symbol, assembly: Assembly):
+  if len(expansion) > 0:
+    jumps = []
+    *intermediate_products, last_product = expansion
 
-  for condition, rule in rules.items():
-    if len(rule) == 0:
-      bodies.append(
-        f'if ({condition}) {{ return STATUS_OK; }}\n'
+    if len(intermediate_products) > 0:
+      jumps.append('      int status;')
+
+    for product in intermediate_products:
+      if product.name in assembly.symbols:
+        jumps.append(
+          f'      status = {push_instruction(assembly, product)};\n'
+          f'      if (status != STATUS_OK) {{ return status; }};\n'
+        )
+      else:
+        jumps.append(
+          f'      status = {function_invocation(product, scope=scope)};\n'
+          f'      if (status != STATUS_OK) {{ return status; }};\n'
+        )
+
+    if last_product.name in assembly.symbols:
+      jumps.append(
+        f'      return {push_instruction(assembly, last_product)};'
       )
-      continue
-
-    cumulative_floats = 0.0
-    cumulative_exprs = []
-    for l in rule.values():
-      if isinstance(l, (int, float)):
-        cumulative_floats += l
-      else:
-        cumulative_exprs.append(l)
-
-    if len(cumulative_exprs) == 0:
-      normalization = cumulative_floats
     else:
-      normalization = f'{cumulative_floats} + ' + ' + '.join(f'({expr})' for expr in cumulative_exprs)
+      jumps.append(
+        f'      return {function_invocation(last_product, scope=scope)};'
+      )
+    jumps = '\n'.join(jumps)
+  else:
+    jumps = 'return STATUS_OK;'
 
-    cumulatives: list[str] = []
-    if isinstance(normalization, float):
-      c = 0.0
-      for l in rule.values():
-        c += l
-        cumulatives.append(str(c / normalization))
+  return jumps
 
-      normalization = None
+def get_total_likelihood(rule):
+  total_floats = 0.0
+  exprs = []
+
+  for l in rule.values():
+    if isinstance(l, (int, float)):
+      total_floats += l
     else:
-      for l in rule.values():
-        cumulatives.append(f'({CUMULATIVE_VARIABLE} += {l})')
+      exprs.append(l)
 
-    branches = []
-    for i, expansion, c in zip(range(len(rule)), rule.keys(), cumulatives):
-      if len(expansion) > 0:
-        jumps = []
-        *intermediate_products, last_product = expansion
+  if len(exprs) == 0:
+    normalization = total_floats
+  else:
+    normalization = f'{total_floats} + ' + ' + '.join(f'({expr})' for expr in exprs)
 
-        if len(intermediate_products) > 0:
-          jumps.append('      int status;')
+  return normalization
 
-        for product in intermediate_products:
-          if product.name in assembly.symbols:
-            jumps.append(
-              f'      status = {push_instruction(assembly, product)};\n'
-              f'      if (status != STATUS_OK) {{ return status; }};\n'
-            )
-          else:
-            jumps.append(
-              f'      status = {function_invocation(product, scope=condition.definition)};\n'
-              f'      if (status != STATUS_OK) {{ return status; }};\n'
-            )
+def generate_op(op: str, assembly: Assembly, maximal_arity: int):
+  from string import Template
+  code = Template(assembly.ops[op]).substitute({
+    'argument': 'argument',
+    'memory': 'memory[argument.integer * n_trace_samples + i]',
+    'input': 'inputs[argument.integer * n_trace_samples + i]',
+  })
 
-        if last_product.name in assembly.symbols:
-          jumps.append(
-            f'      return {push_instruction(assembly, last_product)};'
-          )
-        else:
-          jumps.append(
-            f'      return {function_invocation(last_product, scope=condition.definition)};'
-          )
-        jumps = '\n'.join(jumps)
-      else:
-        jumps = 'return STATUS_OK;'
 
-      if i < len(rule) - 1:
-        branches.append(
-          f'if ({BRANCHING_VARIABLE} < {c}) {{\n{jumps}\n    }}'
-        )
-      else:
-        branches.append(
-          f' {{\n{jumps}\n    }}'
-        )
+  arguments = [f'arg_{i}[i]' for i in range(maximal_arity)]
+  terms = code.split('POP()')
 
-    transitions = ' else '.join(branches)
+  if len(terms) > maximal_arity + 1:
+    raise ValueError('The function consumes more arguments than max. arity!')
 
-    bodies.append(
-      'if ({condition}) {{\n'
-      '    const double {branchinng_variable} = {normalization}pcg32_uniform(rng);\n'
-      '    {comulative_declaration}\n'
-      '    {transition}\n'
+  substituted = list()
+  for term, arg in zip(terms[:-1], arguments):
+    substituted.append(term)
+    substituted.append(arg)
+
+  substituted.append(terms[-1])
+  substituted = ''.join(substituted)
+
+  *definitions, return_expression = substituted.split('\n')
+  definitions = ''.join(f'    {line.strip()}\n' for line in definitions)
+
+  if 'return' in return_expression:
+    body = (
+      f'  for (int i = 0; i < n_trace_samples; ++i) {{\n'
+      f'    {definitions}\n'
+      f'    {return_expression};\n'
+      f'  }}'
+    )
+  else:
+    body = (
+      f'  for (int i = 0; i < n_trace_samples; ++i) {{\n'
+      f'{definitions}\n'
+      f'    output[i] = {return_expression};\n'
+      f'  }}'
+    )
+
+  signature = (
+    'static void symgen_{op}(\n'
+    '  arg_t argument, {args}, \n'
+    '  number_t * output, number_t * inputs, number_t * memory, \n'
+    '  unsigned int n_trace_samples\n'
+    ')'
+  ).format(
+    op=op,
+    args=', '.join([f'number_t * arg_{i}' for i in range(maximal_arity)]),
+  )
+
+  return f'{signature}{{\n{body}\n}}'
+
+
+def generate_function(signature: Symbol, rules: dict[Condition, TransitionTable], assembly: Assembly):
+  condition_total_likelihoods = dict()
+  for condition, rule in rules.items():
+    condition_total_likelihoods[condition] = get_total_likelihood(rule)
+
+  condition_variables = {}
+  for i, condition in enumerate(rules):
+    if len(condition.arguments) > 0:
+      condition_variables[f'{CONDITION_VARIABLE}_{i}'] = ' && '.join(f'({cond})' for cond in condition.arguments)
+    else:
+      condition_variables[f'{CONDITION_VARIABLE}_{i}'] = '1'
+
+  conditional_clauses = list()
+
+  for i, (condition, rule) in enumerate(rules.items()):
+    transitions = list()
+
+    for expansion, likelihood in rule.items():
+      expansion = generate_expansion(expansion, scope=condition.definition, assembly=assembly)
+      transitions.append(
+        f'if ({BRANCHING_VARIABLE} <= ({CUMULATIVE_VARIABLE} += {likelihood})) {{\n'
+        f'{expansion}\n'
+        f'    }}'
+      )
+
+
+    conditional_clauses.append(
+      '  if ({condition}) {{\n'
+      '    {transitions}\n'
       '  }}'.format(
-        condition=' && '.join(f'({cond})' for cond in condition.arguments) if len(condition.arguments) > 0 else '1',
-        transition=transitions,
-        comulative_declaration=f'double {CUMULATIVE_VARIABLE} = 0;' if len(cumulative_exprs) > 0 else '// no need for cumulative variable',
+        condition=f'{CONDITION_VARIABLE}_{i}',
+        transitions=' else '.join(transitions),
         branchinng_variable=BRANCHING_VARIABLE,
         cumulative_variable=CUMULATIVE_VARIABLE,
-        normalization='' if normalization is None else f'({normalization}) * ',
+        condition_likelihood=str(condition_total_likelihoods[condition]),
       )
     )
 
-  body = ' else '.join(bodies)
+  body = '\n\n'.join(conditional_clauses)
+  condition_computation = '\n'.join(
+    f'  const int {k} = {v};' for k, v in condition_variables.items()
+  )
+  condition_likelihoods = '\n'.join(
+    f'  const double {TOTAL_LIKELIHOOD_VARIABLE}_{i} = {condition_total_likelihoods[condition]};'
+    for i, condition in enumerate(rules)
+  )
+
+  total_likelihood_declr = 'const double {variable} = {total};'.format(
+    variable=TOTAL_LIKELIHOOD_VARIABLE,
+    total=' + '.join(
+      f'({CONDITION_VARIABLE}_{i} ? {TOTAL_LIKELIHOOD_VARIABLE}_{i} : 0.0)'
+      for i, _ in enumerate(rules)
+    )
+  )
 
   delcr = function_signature(signature)
   definition = (
     f'{delcr} {{\n'
     f'  DEBUG_PRINT("expand {signature.name}\\n");\n'
+    f'{condition_computation}\n'
+    f'{condition_likelihoods}\n'
+    f'  {total_likelihood_declr}\n'
+    f'  if ({TOTAL_LIKELIHOOD_VARIABLE} <= 0.0) {{ return ERROR_UNPROCESSED_CONDITION; }}\n\n'
+    f'  double {CUMULATIVE_VARIABLE} = 0.0;\n'
+    f'  const double {BRANCHING_VARIABLE} = ({TOTAL_LIKELIHOOD_VARIABLE}) * pcg32_uniform(rng);\n'
+    f'  DEBUG_PRINT("r = %.3lf from %.3lf\\n", {BRANCHING_VARIABLE}, {TOTAL_LIKELIHOOD_VARIABLE});\n'
     f'  if (depth < 0) {{\n'
     f'    return ERROR_MAX_DEPTH;\n'
     f'  }}\n\n'
-    f'  {body};\n'
+    f'{body};\n'
     f'  return ERROR_UNPROCESSED_CONDITION;\n'
     f'}}'
   )
@@ -578,15 +649,44 @@ def generate(
   bitmask_size = ctypes.sizeof(ctypes.c_char) * BITS_IN_BYTE
   bit_set_size = (set_limit // bitmask_size) + (0 if set_limit % bitmask_size == 0 else 1)
 
+  arities = {k: v.count('POP()') for k, v in assembly.ops.items()}
+  max_arity = max(arities.values())
+
+  common_op_type = 'typedef void (*op_t)(arg_t, {inputs}, number_t *, number_t *, number_t *, unsigned int);'.format(
+    inputs=', '.join('number_t *' for _ in range(max_arity))
+  )
+
+  op_table = 'const static op_t ops[{n}] = {{\n{ops}\n}};'.format(
+    n=len(assembly.ops),
+    ops=',\n'.join(f'  symgen_{op}' for op in assembly.ops)
+  )
+
+  arities_declr = 'const int arities[] = {{{array}}};'.format(
+    array=', '.join([str(arity) for _, arity in arities.items()])
+  )
+
+  outputs = 'const int number_of_outputs[] = {{{array}}};'.format(
+    array=', '.join(['0' if op == 'store' else '1' for op in assembly.ops])
+  )
+
+  op_functions = '\n\n'.join(
+    generate_op(op, assembly, max(arities.values()))
+    for op in assembly.ops
+  )
+
   module_code = module_template.substitute({
     'DECLARATIONS': '\n'.join(declarations),
     'DEFINITIONS': '\n\n'.join(definitions),
     'DEFINES': '\n'.join(assembly.symbol_defines.values()),
+    'ARITIES': arities_declr,
+    'MAX_ARITY': str(max_arity),
+    'COMMON_OP_TYPE': common_op_type,
+    'OP_TABLE': op_table,
+    'NUMBER_OF_OUTPUTS': outputs,
     'SEED_SYMBOL': function_invocation(
-      seed_symbol,
-      rng='&rng', stack='&instruction_stack', depth='max_depth', domain='all_variables',
-      scope=None
+      seed_symbol, rng='&rng', stack='&stack', depth='max_depth', domain='all_variables', scope=None
     ),
+    'OPS': op_functions,
     'HASH': f'"{code_hash}"',
     'DEBUG': '#define SYMGEN_DEBUG' if debug else '// debug off',
     'BIT_SET_SIZE': str(bit_set_size),
@@ -625,7 +725,8 @@ class GeneratorMachine(object):
     max_depth: int=1024,
     instruction_limit: int=1024,
     expression_limit: int=1024,
-    max_expression_length: int=128
+    max_expression_length: int=128,
+    trace_samples: np.ndarray[np.float32] | int=32,
   ):
     instructions = np.ndarray(shape=(instruction_limit, 2), dtype=np.int32)
     instruction_sizes = np.ndarray(shape=(expression_limit, ), dtype=np.int32)
@@ -633,7 +734,19 @@ class GeneratorMachine(object):
     if max_inputs is None:
       max_inputs = self.maximal_number_of_inputs
 
-    generated = self.machine.expr_gen(seed_1, seed_2, instructions, instruction_sizes, max_inputs, max_depth, max_expression_length)
+    if isinstance(trace_samples, int):
+      rng = np.random.RandomState(seed_1)
+      trace_samples = np.ndarray(shape=(max_inputs, trace_samples), dtype=np.float32)
+      trace_samples[:] = rng.normal(size=trace_samples.shape)
+
+    assert trace_samples.shape[0] == max_inputs
+
+    trace_buffer = np.ndarray(shape=(instruction_limit, trace_samples.shape[1]), dtype=np.float32)
+
+    generated = self.machine.expr_gen(
+      seed_1, seed_2, instructions, instruction_sizes, max_inputs, max_depth, max_expression_length,
+      trace_samples, trace_buffer,
+    )
 
     total = np.sum(instruction_sizes[:generated])
 

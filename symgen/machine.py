@@ -18,8 +18,8 @@ MEMORY_KW = 'memory'
 KEYWORDS = {
   'stack': ('number_t ** stack', '&stack', 'stack'),
   'argument': ('arg_t argument', 'instruction.argument', 'argument'),
-  'input': ('const number_t * input', 'expression_input', 'input'),
-  'memory': ('number_t * memory', 'memory', 'memory'),
+  'input': ('const number_t * input', 'input[instruction.argument.integer]', 'input[argument.integer]'),
+  'memory': ('number_t * memory', 'memory[instruction.argument.integer]', 'memory[argument.integer]'),
 }
 
 __all__ = [
@@ -54,6 +54,7 @@ def generate(library: Assembly, max_stack_size: int=1024, debug: bool=False):
 
     ### stack is always used (possibly implicitly)
     used_identifiers.add(STACK_KW)
+    used_identifiers.add(ARG_KW)
 
     signature = []
     call_arguments = []

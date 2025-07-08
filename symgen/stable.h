@@ -25,4 +25,43 @@ static inline number_t pinv_p_c(number_t x, number_t c) {
   return exp(asymptotic + local) * MEAN_LOG_NORMAL / (x + c);
 }
 
+static inline number_t ndiv_n_p_c(number_t x1, number_t x2, number_t c) {
+  const double w1 = 0.99056203;
+  const double w2 = 4.35480133;
+
+  const double inv_std = exp(log1p(c) - w1 * exp(-w2 * c));
+  return x1 / (x2 + c) * inv_std;
+}
+
+static inline number_t psqrt_p_c(number_t x, number_t c) {
+  const double w0 = 0.23253458;
+  const double w2 = -0.342227;
+  const double w3 = 5.0;
+  const double norm = exp(
+    w0 + 0.5 * log1p(c) + w2 * exp(-w3 * c)
+  );
+  return (sqrt(x + c) - sqrt(c)) * MEAN_LOG_NORMAL * norm;
+}
+
+static inline number_t ntanh_n_c(number_t x, number_t c) {
+  const double w0 = 0.638976995;
+  const double w1 = 0.52642439;
+  const double w2 = 0.6372085;
+
+  const double std = w0 * (tanh(w1 * c) + 1) * (tanh(-w1 * c) + 1);
+  const double mean = tanh(w2 * c);
+
+  return (tanh(x + c) - mean) / std;
+}
+
+static inline number_t nlog_p_c(number_t x, number_t c) {
+  const double w0 =-1.26318484;
+  const double w1 = 1.49033208;
+
+  const double mean = log(c + SQRT_2) - 0.5 * LOG_2 * exp(w0 * c);
+  const double std = w1 / (w1 + c);
+
+  return (log(x + c) - mean) / std;
+}
+
 #endif // SYMGEN_STABLE_H

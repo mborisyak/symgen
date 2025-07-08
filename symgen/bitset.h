@@ -334,7 +334,7 @@ static inline BitSet bitset_range(const unsigned int start, const unsigned int e
     const unsigned int block = i / (sizeof(bitmask_t) * BITS);
     const unsigned int offset = i % (sizeof(bitmask_t) * BITS);
     const bitmask_t mask = 1u << offset;
-    result.bits[i] |= mask;
+    result.bits[block] |= mask;
   }
   result.size = end - start;
   result.size = result.size < 0 ? 0 : result.size;
