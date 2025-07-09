@@ -1,28 +1,8 @@
-from typing import TypeAlias, Sequence
+from typing import TypeAlias, Sequence, Callable, Any
+import inspect
 import string
-import os
 
 import numpy as np
-
-from .assembly import Assembly
-from . import compilation
-
-ROOT = os.path.dirname(__file__)
-TEMPLATE = os.path.join(ROOT, 'sym_gen.template.c')
-
-### template identifier: (signature element, call argument, body identifier)
-KEYWORDS = {
-  'stack': ('number_t ** stack', '&stack', 'stack'),
-  'argument': ('arg_t argument', 'instruction.argument', 'argument'),
-  'input': ('const number_t * input', 'expression_input', 'input'),
-  'memory': ('number_t * memory', 'memory', 'memory'),
-}
-
-BRANCHING_VARIABLE = '_branching_random'
-CUMULATIVE_VARIABLE = '_cumulative'
-TOTAL_LIKELIHOOD_VARIABLE = '_likelihood'
-CONDITION_VARIABLE = '_condition'
-BITS_IN_BYTE = 8
 
 __all__ = [
   'generate',
@@ -31,23 +11,12 @@ __all__ = [
   'GeneratorMachine'
 ]
 
-import re
-C_ARG_DECLARATION_RE = re.compile(r'([^[]*\s+)?(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)(\s*\[.*])?\s*')
-
-def argument_name(declaration):
-  matched = C_ARG_DECLARATION_RE.fullmatch(declaration)
-  if matched is None:
-    raise ValueError(f'{declaration} is not a valid argument declaration')
-
-  return matched.group('name')
-
 class Symbol(object):
   __slots__ = ('name', 'arguments', 'argument_names')
 
   def __init__(self, name: str, *arguments: str):
     self.name = name
     self.arguments = arguments
-    self.argument_names = [argument_name(arg) for arg in arguments]
 
   def __hash__(self):
     return hash((self.name, *self.arguments))
@@ -64,11 +33,25 @@ class Symbol(object):
   def __repr__(self):
     return f'symbol {self.name}({", ".join(str(x) for x in self.arguments)})'
 
-  def when(self, *conditions: str) -> 'Condition':
-    return Condition(self, *conditions)
+  def when(self, condition) -> 'Condition':
+    signature = inspect.signature(condition)
 
-  def __call__(self, *args: str | int | float, domain=None, depth=None, **kwargs: str | int | float) -> 'Invocation':
-    return Invocation(self, *args, **kwargs, domain=None, depth=None)
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for _, p in signature.parameters.items()):
+      return Condition(self, condition)
+    else:
+      assert not any(p.kind == inspect.Parameter.VAR_POSITIONAL in self.arguments for _, p in signature.parameters.items())
+      assert all(name in self.arguments for name in signature.parameters)
+      return Condition(self, condition)
+
+  def __call__(self, *args, **kwargs) -> 'Invocation':
+    assert len(args) <= len(self.arguments), 'too many arguments'
+
+    arguments = dict(zip(args, self.arguments))
+    for k, v in kwargs.items():
+      assert k not in arguments, f'The argument {k} is already passed as a positional argument'
+      arguments[k] = v
+
+    return Invocation(self, arguments)
 
   def __add__(self, other):
     if isinstance(other, Symbol):
@@ -86,29 +69,38 @@ class Symbol(object):
       )
 
 def symbol(name: str):
-  def constructor(*arguments: str | int | float):
+  def constructor(*arguments: str):
     return Symbol(name, *arguments)
   return constructor
 
 def op(name: str):
   return Symbol(name)
 
-class Condition(object):
-  __slots__ = ('definition', 'arguments')
+def condition_str(condition: Callable[..., Any]):
+  params = ', '.join(
+    f'**{name}' if p.kind == inspect.Parameter.VAR_KEYWORD else name
+    for name, p in inspect.signature(condition).parameters.items()
+  )
 
-  def __init__(self, definition: Symbol, *arguments: str):
+  return f'({params}) -> {condition.__code__.hex()}'
+
+class Condition(object):
+  __slots__ = ('definition', 'condition')
+
+  def __init__(self, definition: Symbol, condition: callable):
     self.definition = definition
-    self.arguments = arguments
+    self.condition = condition
 
   def __repr__(self):
-    return f'{self.definition.name}.when({", ".join(str(x) for x in self.arguments)})'
+    return f'{self.definition.name}.when({condition_str(self.condition)})'
 
   def __hash__(self):
-    return hash((self.definition.name, *self.arguments))
+    code = self.condition.__code__
+    return hash((self.definition.name, code.co_code, code.co_consts, code.co_names, code.co_varnames))
 
   def __eq__(self, other):
     if isinstance(other, Condition):
-      return self.definition == other.definition and self.arguments == other.arguments
+      return self.definition == other.definition and conditions_eq(self.condition, other.condition)
     else:
       return False
 
@@ -117,40 +109,28 @@ class Condition(object):
       return self.definition.name
 
 class Invocation(object):
-  __slots__ = ('definition', 'arguments', 'keyword_arguments', 'domain', 'depth')
+  __slots__ = ('definition', 'arguments')
 
-  def __init__(
-    self, definition: Symbol, *arguments: str | int | float,
-    domain: str | None = None,
-    depth: str | None = None,
-    **keyword_arguments: str | int | float,
-  ):
+  def __init__(self, definition: Symbol, arguments: dict[str, Callable[..., Any]]):
     self.definition = definition
     self.arguments = arguments
-    self.keyword_arguments = keyword_arguments
-    self.domain = domain
-    self.depth = depth
 
   def __hash__(self):
-    kwargs = (
-      *(f'{k}={v}' for k, v in self.keyword_arguments.items()),
-      *(() if self.domain is None else (f'domain={self.domain}', )),
-      *(() if self.depth is None else (f'depth={self.domain}',))
+    arguments = (
+      (k, c.__code__.co_code, c.__code__.co_consts, c.__code__.co_names, c.__code__.co_varnames)
+      for k, c in self.arguments.items()
     )
-    ### tuple of a tuple for making it compatible with a single-item Expansion
-    return hash((
-      (self.definition, *self.arguments, *kwargs),
-    ))
+    return hash(((self.definition, *arguments), ))
 
   def __eq__(self, other):
     if isinstance(other, Invocation):
-      return (
-        self.definition == other.definition and
-        self.arguments == other.arguments and
-        self.keyword_arguments == other.keyword_arguments and
-        self.domain == other.domain and
-        self.depth == other.depth
-      )
+      if self.definition != other.definition:
+        return False
+
+      if self.arguments.keys() != other.arguments.keys():
+        return False
+
+      return all(conditions_eq(self.arguments[k], other.arguments[k]) for k in self.arguments)
 
     else:
       return False
@@ -172,14 +152,11 @@ class Invocation(object):
       )
 
   def __repr__(self):
-    args = (
-      *(str(x) for x in self.arguments),
-      *(f'{k}={v}' for k, v in self.keyword_arguments.items()),
-      *(() if self.domain is None else (f'domain={self.domain}',)),
-      *(() if self.depth is None else (f'depth={self.domain}',))
+    args = ','.join(
+      f'{k}={condition_str(v)}' for k, v in self.arguments.items()
     )
 
-    return f'{self.definition.name}({", ".join(args)})'
+    return f'{self.definition.name}({args})'
 
   @property
   def name(self):
@@ -217,10 +194,7 @@ class Expansion(object):
     return len(self.invocations)
 
   def __hash__(self):
-    return hash(tuple(
-      (invocation.definition, *invocation.arguments, *(f'{k}={v}' for k, v in invocation.keyword_arguments.items()))
-      for invocation in self.invocations
-    ))
+    return hash(tuple(self.invocations))
 
   def __eq__(self, other):
     if isinstance(other, Expansion):
@@ -231,8 +205,8 @@ class Expansion(object):
     else:
       return False
 
-TransitionTable: TypeAlias = dict[Expansion | Invocation | Symbol, float] | Expansion | Invocation | Symbol
-UpcastedTransitionTable: TypeAlias = dict[Expansion, float | str]
+TransitionTable: TypeAlias = dict[Expansion | Invocation | Symbol, float | Callable[..., float]] | Expansion | Invocation | Symbol
+UpcastedTransitionTable: TypeAlias = dict[Expansion, float | Callable[..., float]]
 
 class Grammar(object):
   transitions : dict[Symbol, dict[Condition, UpcastedTransitionTable]]
@@ -303,51 +277,6 @@ class Grammar(object):
       )
       for symbol, rules in self.transitions.items()
       for condition, expansions in self.transitions[symbol].items()
-    )
-
-def get_hash(
-  assembly: Assembly, grammar: Grammar, seed_symbol: Invocation,
-  maximal_number_of_inputs: int, stack_limit: int, debug: bool=False
-):
-  import hashlib
-  algo = hashlib.sha256()
-
-  algo.update(repr(assembly).encode())
-  algo.update(b'!')
-  algo.update(repr(grammar).encode())
-  algo.update(b'!')
-  algo.update(repr(seed_symbol).encode())
-  algo.update(b'!')
-  algo.update(repr(debug).encode())
-  algo.update(b'!')
-  algo.update(repr(maximal_number_of_inputs).encode())
-  algo.update(b'!')
-  algo.update(repr(stack_limit).encode())
-
-  return algo.hexdigest()
-
-def argument_declaration(arg: str):
-  tokens = [t for t in arg.split(' ') if len(t) > 0]
-
-  *modifiers, name = tokens
-
-  if len(modifiers) > 0:
-    return arg
-  else:
-    return f'int {arg}'
-
-def function_signature(signature: Symbol):
-  if len(signature.arguments) > 0:
-    arguments = ', '.join(argument_declaration(arg) for arg in signature.arguments)
-
-    return (
-      f'static int symgen_expand_{signature.name}'
-      f'(pcg32_random_t * rng, InstructionStack * stack, const int depth, const BitSet domain, {arguments})'
-    )
-  else:
-    return (
-      f'static int symgen_expand_{signature.name}'
-      f'(pcg32_random_t * rng, InstructionStack * stack, const int depth, const BitSet domain)'
     )
 
 def match_arguments(invocation: Invocation, scope: Symbol | None=None):

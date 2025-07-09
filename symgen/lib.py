@@ -1,61 +1,43 @@
-import math
+from typing import Protocol, Any
+import numpy as np
 
 __all__ = [
+  'Operation',
   'core', 'std',
 
   'merge'
 ]
 
+class Operation(Protocol):
+  def __call__(self, *args: np.ndarray[np.number], **kwargs: Any):
+    ...
+
+
+def const(*, inputs, argument):
+  return np.tile(argument, reps=inputs.shape[1:], )
+
+def variable(*, inputs, argument, out):
+  out[:] = inputs[argument]
+  return
+
+def retrieve(*, memory, argument, out):
+  out[:] = memory[argument]
+  return
+
+def store(x, *, memory, argument):
+  memory[argument] = x
+  return
 
 core = dict(
-  const='${argument}.number',
-  integer='(number_t) ${argument}.integer',
-  input='${input}',
-  memory='${memory}',
-  store='${memory} = POP();\n'
-        'return;',
+  const=const,
+  variable=variable,
+  retrieve=retrieve,
+  store=store
 )
 
 std = dict(
-  add='const number_t a = POP();\n'
-      'const number_t b = POP();\n'
-      'a + b',
-  sub='const number_t a = POP();\n'
-      'const number_t b = POP();\n'
-      'a - b',
-  isub='const number_t a = POP();\n'
-       'const number_t b = POP();\n'
-       'b - a',
-  neg='const number_t a = POP();\n'
-      '-a',
-  mul='const number_t a = POP();\n'
-      'const number_t b = POP();\n'
-      'a * b',
-  div='const number_t a = POP();\n'
-      'const number_t b = POP();\n'
-      'a / b',
-  idiv='const number_t a = POP();\n'
-       'const number_t b = POP();\n'
-       'b / a',
-  inv='const number_t a = POP();\n'
-      '1 / a',
-  exp='const number_t a = POP();\n'
-      'exp(a)',
-  log='const number_t a = POP();\n'
-      'log(a)',
-  sqrt='const number_t a = POP();\n'
-       'sqrt(a)',
-  square='const number_t a = POP();\n'
-         'a * a',
-  cube='const number_t a = POP();\n'
-       'a * a * a',
-  softplus='const number_t a = POP();\n'
-           'a > 0 ? a + log1p(exp(-a)) : log1p(exp(a))',
-  tanh='const number_t a = POP();\n'
-       'tanhf(a);',
-  sigmoid='const number_t a = POP();\n'
-          '0.5 + 0.5 * tanhf(a);',
-  erf='erf(POP())',
+  add=lambda x, y, *, out: np.add(x, y, out=out),
+  mul=lambda x, y, *, out: np.multiply(x, y, out=out),
 )
 
 stable = dict(
@@ -201,7 +183,7 @@ stable = dict(
 )
 
 
-def merge(*libraries: dict[str, str]):
+def merge(*libraries: dict[str, Operation]) -> dict[str, Operation]:
   library = dict()
 
   for lib in libraries:
