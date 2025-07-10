@@ -4,49 +4,54 @@ import inspect
 import random
 import numpy as np
 
-from .lib import merge, Operation
+from .operation import Operation, inspect_op
+from .lib import merge
 
 __all__ = [
-  'symbol',
+  'symbol', 'op',
   'Invocation', 'Symbol',
   'GeneratorMachine'
 ]
 
-class Symbol(object):
-  __slots__ = ('name', 'arguments', 'argument_names')
+class Op(object):
+  __slots__ = ('name', 'arguments')
 
-  def __init__(self, *arguments: str):
+  def __init__(self, name: str, *arguments: Any):
+    self.name = name
     self.arguments = arguments
 
-  def __hash__(self):
-    return hash((self.name, *self.arguments))
-
-  def __eq__(self, other):
+  def __add__(self, other):
     if isinstance(other, Symbol):
-      return (
-        self.name == other.name and
-        self.arguments == other.arguments
-      )
+      return Expansion(self, other())
+
+    elif isinstance(other, Invocation) or isinstance(other, Op):
+      return Expansion(self, other)
+
+    elif isinstance(other, Expansion):
+      return Expansion(self, *other.invocations)
+
     else:
-      return False
+      raise ValueError(
+        'expansion should include only instances Invocation or Symbol (eqv. to invocation w/o arguments)'
+      )
+
+class Symbol(object):
+  __slots__ = ('name', 'arguments', )
+
+  def __init__(self, name, *arguments: str):
+    self.name = name
+    self.arguments = arguments
 
   def __repr__(self):
-    return f'symbol {self.name}({", ".join(str(x) for x in self.arguments)})'
+    return f'symbol({self.name})({", ".join(str(x) for x in self.arguments)})'
 
   def when(self, condition: Callable[..., bool] | None=None) -> 'Condition':
-    signature = inspect.signature(condition)
-
-    if any(p.kind == inspect.Parameter.VAR_KEYWORD for _, p in signature.parameters.items()):
-      return Condition(self, condition)
-    else:
-      assert not any(p.kind == inspect.Parameter.VAR_POSITIONAL in self.arguments for _, p in signature.parameters.items())
-      assert all(name in self.arguments for name in signature.parameters)
-      return Condition(self, condition)
+    return Condition(self, condition)
 
   def __call__(self, *args: Any, **kwargs: Any) -> 'Invocation':
     assert len(args) <= len(self.arguments), 'too many arguments'
 
-    arguments = dict(zip(args, self.arguments))
+    arguments = dict(zip(self.arguments, args))
     for k, v in kwargs.items():
       assert k not in arguments, f'The argument {k} is already passed as a positional argument'
       arguments[k] = v
@@ -57,7 +62,7 @@ class Symbol(object):
     if isinstance(other, Symbol):
       return Expansion(self(), other())
 
-    elif isinstance(other, Invocation):
+    elif isinstance(other, Invocation) or isinstance(other, Op):
       return Expansion(self(), other)
 
     elif isinstance(other, Expansion):
@@ -68,10 +73,19 @@ class Symbol(object):
         'expansion should include only instances Invocation or Symbol (eqv. to invocation w/o arguments)'
       )
 
-def symbol(*arguments: str):
-  return Symbol(*arguments)
+def symbol(name: str):
+  def constructor(*arguments: str):
+    return Symbol(name, *arguments)
+
+  return constructor
+
+def op(name: str, *arguments: Any):
+  return Op(name, *arguments)
 
 def condition_str(condition: Callable[..., Any]):
+  if not callable(condition):
+    return repr(condition)
+
   params = ', '.join(
     f'**{name}' if p.kind == inspect.Parameter.VAR_KEYWORD else name
     for name, p in inspect.signature(condition).parameters.items()
@@ -106,15 +120,6 @@ class Condition(object):
   def __repr__(self):
     return f'{self.definition.name}.when({condition_str(self.condition)})'
 
-  def __hash__(self):
-    return hash((self.definition.name, self.condition))
-
-  def __eq__(self, other):
-    if isinstance(other, Condition):
-      return self.definition == other.definition and self.condition == other.condition
-    else:
-      return False
-
   @property
   def name(self):
       return self.definition.name
@@ -126,24 +131,6 @@ class Invocation(object):
     self.definition = definition
     self.arguments = arguments
 
-  def __hash__(self):
-    arguments = ((k, c) for k, c in self.arguments.items())
-    return hash(((self.definition, *arguments), ))
-
-  def __eq__(self, other):
-    if isinstance(other, Invocation):
-      if self.definition != other.definition:
-        return False
-
-      if self.arguments.keys() != other.arguments.keys():
-        return False
-
-      return all(self.arguments[k] == other.arguments[k] for k in self.arguments)
-
-    else:
-      return False
-
-
   def __add__(self, other):
     if isinstance(other, Invocation):
       return Expansion(self, other)
@@ -153,6 +140,9 @@ class Invocation(object):
 
     elif isinstance(other, Symbol):
       return Expansion(self, other())
+
+    elif isinstance(other, Op):
+      return Expansion(self, other)
 
     else:
       raise ValueError(
@@ -164,7 +154,7 @@ class Invocation(object):
       f'{k}={condition_str(v)}' for k, v in self.arguments.items()
     )
 
-    return f'{self.definition.name}({args})'
+    return f'{self.definition!r}({args})'
 
   @property
   def name(self):
@@ -173,14 +163,14 @@ class Invocation(object):
 class Expansion(object):
   __slots__ = ('invocations',)
 
-  def __init__(self, *variables: Invocation | Operation):
+  def __init__(self, *variables: Invocation | Op):
     self.invocations = variables
 
-  def __add__(self, other: Invocation | Symbol | Operation):
+  def __add__(self, other: Invocation | Symbol | Op):
     if isinstance(other, Symbol):
       return Expansion(*self.invocations, other())
 
-    elif isinstance(other, Invocation) or callable(other):
+    elif isinstance(other, Invocation) or isinstance(other, Op):
       return Expansion(*self.invocations, other)
 
     elif isinstance(other, Expansion):
@@ -188,7 +178,7 @@ class Expansion(object):
 
     else:
       raise ValueError(
-        'expansion should include only instances of Invocation or Symbol (cast into invocation w/o arguments)'
+        'expansion should include only instances of Invocation, Symbol (cast into invocation w/o arguments) or operation'
       )
 
   def __iter__(self):
@@ -201,22 +191,8 @@ class Expansion(object):
   def __len__(self):
     return len(self.invocations)
 
-  def __hash__(self):
-    return hash(tuple(
-      (inv.definition, *((k, v) for k, v in inv.arguments.items()))
-      for inv in self.invocations
-    ))
-
-  def __eq__(self, other):
-    if isinstance(other, Expansion):
-      return len(self) == len(other) and all(
-        self_inv == other_inv for self_inv, other_inv in zip(self, other)
-      )
-
-    else:
-      return False
-
-TransitionTable: TypeAlias = dict[Expansion | Invocation | Symbol, float | Callable[..., float]] | Expansion | Invocation | Symbol
+ExpansionLike: TypeAlias = Expansion | Invocation | Symbol | Op
+TransitionTable: TypeAlias = dict[ExpansionLike, float | Callable[..., float]] | ExpansionLike
 UpcastedTransitionTable: TypeAlias = dict[Expansion, float | Callable[..., float]]
 NormalizedGrammar: TypeAlias = dict[Symbol, dict[Condition, UpcastedTransitionTable]]
 
@@ -230,13 +206,15 @@ def normalize_grammar(rules: dict[Condition | Symbol, TransitionTable]) -> Norma
       original_table = rules[condition]
     elif rules[condition] is None:
       original_table = {}
-    elif isinstance(rules[condition], (Expansion, Invocation, Symbol)):
+    elif isinstance(rules[condition], (Expansion, Invocation, Symbol, Op)):
       original_table = {rules[condition]: 1.0}
     else:
       raise ValueError('transition table can be either dict, a single Expansion/Invocation/Symbol, or None.')
 
     for expansion, prob in original_table.items():
-      if isinstance(expansion, Symbol):
+      if isinstance(expansion, Op):
+        expansion = Expansion(expansion, )
+      elif isinstance(expansion, Symbol):
         expansion = Expansion(expansion(), )
       elif isinstance(expansion, Invocation):
         expansion = Expansion(expansion, )
@@ -245,7 +223,7 @@ def normalize_grammar(rules: dict[Condition | Symbol, TransitionTable]) -> Norma
       else:
         raise ValueError(
           f'Expected either an Expansion (symbol1(...) + symbol2(...)), '
-          f'a single Symbol or a single Invocation, got {expansion}.'
+          f'a single Operation, a single Symbol or a single Invocation, got {expansion}.'
         )
 
       expansion = Expansion(*(
@@ -291,6 +269,38 @@ def apply_with_scope(f, **kwargs):
   signature = inspect.signature(f)
   return f(**{k: kwargs[k] for k in signature.parameters})
 
+def invoke(
+  rng: random.Random,
+  invocation: Invocation, local_scope: dict[str, Any], global_scope: dict[str, Any], *,
+  inputs: np.ndarray[np.float32], stack: list[np.ndarray[np.float32]] | None, memory: dict[int, np.ndarray[np.float32]]
+):
+  arguments = {}
+  global_scope_updated = {}
+
+  for k, v in invocation.arguments.items():
+    if callable(v):
+      value = apply_with_scope(v, **local_scope, **global_scope, rng=rng, inputs=inputs, stack=stack, memory=memory)
+    else:
+      value = v
+
+    if k in global_scope:
+      global_scope_updated[k] = value
+    else:
+      arguments[k] = value
+
+  for k in invocation.definition.arguments:
+    if k not in arguments:
+      if k in local_scope:
+        arguments[k] = local_scope[k]
+      else:
+        raise ValueError(f'Invocation context does not contain argument {k}.')
+
+  for k in global_scope:
+    if k not in global_scope_updated:
+      global_scope_updated[k] = global_scope[k]
+
+  return invocation.definition(**arguments), global_scope_updated
+
 def sample(rng: random.Random, likelihoods):
   norm = sum(likelihoods)
   u = rng.uniform(0, norm)
@@ -309,24 +319,46 @@ class GeneratorMachine(object):
     rules: dict[Condition | Symbol, TransitionTable],
   ):
     self.library = merge(*libraries)
+    self.properties = {
+      name: inspect_op(operation)
+      for name, operation in self.library.items()
+    }
     self.grammar = normalize_grammar(rules)
 
-  def __call__(self, rng: random.Random, seed_symbol: Symbol | Invocation):
+  def __call__(
+    self, rng: random.Random, seed_symbol: Symbol | Invocation, *,
+    trace: np.ndarray[np.float32] | None=None,
+    stack: list[np.ndarray[np.float32]] | None=None,
+    memory: dict[int, np.ndarray[np.float32]] | None = None,
+    **global_scope
+  ):
     if isinstance(seed_symbol, Symbol):
       seed_symbol = seed_symbol()
 
     result = []
+    if trace is not None:
+      stack = list() if stack is None else [x for x in stack]
+      memory = dict() if memory is None else {k: v for k, v in memory.items()}
+    else:
+      stack = None
+      memory = None
 
     transition_rules = self.grammar[seed_symbol.definition]
     active_rules = [
       (expansion, prob)
-      for condition, table in transition_rules
-      for expansion, prob in table
-      if check_condition(**seed_symbol.arguments)
+      for condition, table in transition_rules.items()
+      for expansion, prob in table.items()
+      if check_condition(
+        condition, **seed_symbol.arguments, **global_scope,
+        rng=rng, inputs=trace, stack=stack, memory=memory
+      )
     ]
 
+    if len(active_rules) == 0:
+      raise ValueError(f'Uncaught condition {seed_symbol.arguments} (global: {global_scope}).')
+
     likelihoods = [
-      apply_with_scope(prob, **seed_symbol.arguments) if callable(prob) else prob
+      apply_with_scope(prob, **seed_symbol.arguments, **global_scope, rng=rng, stack=stack, memory=memory) if callable(prob) else prob
       for _, prob in active_rules
     ]
 
@@ -334,17 +366,46 @@ class GeneratorMachine(object):
 
     expansion, _ = active_rules[index]
 
-    for invocation in expansion:
-      concrete_invocation = invocation.definition(**{
-        k: apply_with_scope(v, **seed_symbol.arguments) if callable(v) else v
-        for k, v in invocation.arguments
-      })
+    for term in expansion:
+      if isinstance(term, Op):
+        assert term.name in self.library, f'unknown op {term.name}'
+        arguments = [
+          apply_with_scope(v, **seed_symbol.arguments, **global_scope, rng=rng, stack=stack, memory=memory, inputs=trace) if callable(v) else v
+          for v in term.arguments
+        ]
+        result.append((term.name, *arguments))
 
-      result.extend(
-        self(rng, seed_symbol=concrete_invocation)
-      )
+        if trace is not None:
+          arity, scope = self.properties[term.name]
+          args = [stack.pop() for _ in range(arity)]
 
-    return result
+          kwargs = {}
+          if 'inputs' in scope:
+            kwargs['inputs'] = trace
+          if 'memory' in scope:
+            kwargs['memory'] = memory
+          if 'argument' in scope:
+            kwargs['argument'], = arguments
 
+          if 'out' in scope:
+            _, *batch = trace.shape
+            out = np.ndarray(shape=batch, dtype=np.float32)
+            self.library[term.name](*args, **kwargs, out=out)
+            stack.append(out)
+          else:
+            out = self.library[term.name](*args, **kwargs)
+            if out is not None:
+              stack.append(out)
+      else:
+        concrete_invocation, global_scope_updated = invoke(
+          rng, term, seed_symbol.arguments, global_scope,
+          inputs=trace, stack=stack, memory=memory
+        )
 
+        terms, stack, memory = self(
+          rng, seed_symbol=concrete_invocation, **global_scope_updated,
+          trace=trace, stack=stack, memory=memory
+        )
+        result.extend(terms)
 
+    return result, stack, memory

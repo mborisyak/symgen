@@ -1,16 +1,12 @@
-from typing import Protocol, Any
 import numpy as np
 
+from .operation import Operation
+
 __all__ = [
-  'Operation',
   'core', 'std',
 
   'merge'
 ]
-
-class Operation(Protocol):
-  def __call__(self, *args: np.ndarray[np.number], **kwargs: Any):
-    ...
 
 
 def const(*, inputs, argument):
@@ -38,6 +34,8 @@ core = dict(
 std = dict(
   add=lambda x, y, *, out: np.add(x, y, out=out),
   mul=lambda x, y, *, out: np.multiply(x, y, out=out),
+  exp=lambda x, *, out: np.exp(x, out=out),
+  sqrt=lambda x, *, out: np.sqrt(x, out=out),
 )
 
 stable = dict(

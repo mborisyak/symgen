@@ -60,10 +60,11 @@ def test_source():
 
 def test_sampling():
   import random
-  n = 1024
+  n = 32
   ps = [random.expovariate() for _ in range(n)]
 
   rng = random.Random(123)
+  np_rng = np.random.default_rng(123)
 
   def s1(rng, likelihoods):
 
@@ -96,14 +97,52 @@ def test_sampling():
   end_t = time.perf_counter()
   print(f's2: {N / (end_t - start_t)/ 1.0e+6} Miter/sec')
 
-  def s3(likelihoods):
+  def s3(rng, likelihoods):
     ls = np.array(likelihoods)
     p = ls / np.sum(ls)
-    return np.random.choice(n, p=p, replace=True)
+    return rng.choice(n, p=p, replace=True)
 
   import time
   start_t = time.perf_counter()
   for _ in range(N):
-    s3(ps)
+    s3(np_rng, ps)
   end_t = time.perf_counter()
   print(f's3: {N / (end_t - start_t)/ 1.0e+6} Miter/sec')
+
+def test_alloc():
+  import random, time
+  n, m = 1024, 128
+  stack = np.ndarray(shape=(n, m), dtype=np.float32)
+
+  stack[:2] = np.random.normal(size=(2, m))
+
+  start_t = time.time()
+  for i in range(2, n):
+    if random.randint(0, 2) == 0:
+      np.add(stack[i - 1], stack[i - 2], out=stack[i])
+    else:
+      np.multiply(stack[i - 1], stack[i - 2], out=stack[i])
+
+  end_t = time.time()
+
+  print(f'{(end_t - start_t) * 1.0e+3:.2f} millisec')
+
+  stack = list()
+  stack.append(np.random.normal(size=(m, )))
+  stack.append(np.random.normal(size=(m, )))
+
+  start_t = time.time()
+  for i in range(2, n):
+    if random.randint(0, 2) == 0:
+      stack.append(
+        np.add(stack[-1], stack[-2])
+      )
+    else:
+      stack.append(
+        np.multiply(stack[-1], stack[-2])
+      )
+
+  end_t = time.time()
+
+  print(f'{(end_t - start_t) * 1.0e+3:.2f} millisec')
+

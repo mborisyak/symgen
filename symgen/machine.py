@@ -1,28 +1,7 @@
-import inspect
-
 import numpy as np
 
+from .operation import inspect_op
 from .lib import Operation, merge
-
-def inspect_op(op: Operation):
-  signature = inspect.signature(op)
-  assert all(p.kind != inspect.Parameter.VAR_POSITIONAL for _, p in signature.parameters.items()), \
-    'functions with variable positional arguments are not valid operations'
-
-  assert all(p.kind != inspect.Parameter.VAR_KEYWORD for _, p in signature.parameters.items()), \
-    'functions with variable keyword arguments are not valid operations'
-
-  arity = len([
-    p for _, p in signature.parameters.items()
-    if p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD or p.kind == inspect.Parameter.POSITIONAL_ONLY
-  ])
-
-  scope_variables = set([
-    name for name, p in signature.parameters.items()
-    if p.kind == inspect.Parameter.KEYWORD_ONLY
-  ])
-
-  return arity, scope_variables
 
 class StackMachine(object):
   def __init__(self, *libraries: dict[str, Operation], max_stack_size: int | None=None):
@@ -34,8 +13,12 @@ class StackMachine(object):
     }
     self.max_stack_size = max_stack_size
 
-  def __call__(self, expression, inputs, *, out=None):
-    n, *batch = inputs.shape
+  def __call__(self, expression, inputs=None, *, out=None):
+    if inputs is None:
+      n, batch = 0, ()
+    else:
+      n, *batch = inputs.shape
+
     max_stack_size = len(expression) if self.max_stack_size is None else self.max_stack_size
     max_stack_size = min(max_stack_size, len(expression))
 
@@ -43,7 +26,7 @@ class StackMachine(object):
     index = 0
     memory = np.ndarray(shape=(max_stack_size, *batch), dtype=inputs.dtype)
 
-    for op, arg in expression:
+    for op, *args in expression:
       arity, scope = self.properties[op]
       arguments = [stack[index - i - 1] for i in range(arity)]
 
@@ -53,7 +36,7 @@ class StackMachine(object):
       if 'memory' in scope:
         kwargs['memory'] = memory
       if 'argument' in scope:
-        kwargs['argument'] = arg
+        kwargs['argument'], = args
 
       index -= arity
 
@@ -72,15 +55,19 @@ class StackMachine(object):
     else:
       return np.copy(stack[:index])
 
-  def trace(self, expression, inputs):
-    n, *batch = inputs.shape
+  def trace(self, expression, inputs=None):
+    if inputs is None:
+      inputs = np.ndarray(shape=(0, 1), dtype=np.float32)
 
-    stack = np.ndarray(shape=(len(expression), *batch), dtype=inputs.dtype)
+    n, *batch = inputs.shape
+    dtype = inputs.dtype
+
+    stack = np.ndarray(shape=(len(expression), *batch), dtype=dtype)
     index = 0
-    memory = np.ndarray(shape=(len(expression), *batch), dtype=inputs.dtype)
+    memory = np.ndarray(shape=(len(expression), *batch), dtype=dtype)
     expression_lens = np.ndarray(shape=(len(expression), ), dtype=np.uint32)
 
-    for op, arg in expression:
+    for op, *arg in expression:
       arity, scope = self.properties[op]
       l = 0
       arguments = []
@@ -96,7 +83,7 @@ class StackMachine(object):
       if 'memory' in scope:
         kwargs['memory'] = memory
       if 'argument' in scope:
-        kwargs['argument'] = arg
+        kwargs['argument'], = arg
 
       if 'out' in scope:
         self.library[op](*arguments, **kwargs, out=stack[index])

@@ -199,9 +199,8 @@ def test_const_grammar():
   plt.close()
 
 def test_simple_grammar():
-  import math
   import symgen
-  from symgen.generator import GeneratorMachine, symbol
+  from symgen.generator import GeneratorMachine, symbol, op
 
   lib = symgen.lib.merge(symgen.lib.core, symgen.lib.std)
 
@@ -209,17 +208,16 @@ def test_simple_grammar():
   constant = symbol('constant')()
 
   rules={
-    expr: {
-      expr + expr + lib['add']: 0.1,
-      expr + expr + lib['mul']: 0.2,
-      constant: 0.6,
+    expr.when(lambda i: i > 0): {
+      expr(lambda i: i - 1) + expr(lambda i: i - 1) + op('add'): 1.0,
+      expr(lambda i: i - 1) + expr(lambda i: i - 1) + op('mul'): 1.0,
+      constant: lambda i: 1 / (i + 1),
     },
+    expr.when(lambda i: i <= 0) : constant(),
     constant: {
-      (lib['const'], 0.0): 0.2,
-      (lib['const'], 1.0): 0.2,
-      (lib['const'], 2.0): 0.2,
-      (lib['const'], math.pi): 0.2,
-      (lib['const'], math.e): 0.2,
+      op('const', 0.0): 1.0,
+      op('const', 1.0): 1.0,
+      op('const', 2.0): 1.0,
     }
   }
 
@@ -229,194 +227,60 @@ def test_simple_grammar():
 
   print(result)
 
-def test_grammar_hash():
-  from symgen.generator import Grammar, symbol, op
+def test_scope():
+  import symgen
+  from symgen.generator import GeneratorMachine, symbol, op
 
-  libraries = (symgen.lib.core, symgen.lib.std)
+  lib = symgen.lib.merge(symgen.lib.core, symgen.lib.std)
 
-  expr = symbol('expr')('i', 'j')
-  mult = symbol('multiply')()
+  expr = symbol('expr')('i')
+  unop = symbol('unop')()
+  biop = symbol('biop')()
   constant = symbol('constant')()
 
-  grammar = Grammar(
-    rules={
-      expr.when('i > 0'): {
-        expr(j=0, i='i - 1') + expr('i - 1') + op('add'): 'i',
-        expr('i - 1') + expr('i - 1') + mult: 1,
-        constant: 2,
-      },
-      expr.when('i == 0'): {
-        constant + constant + op('add'): 1,
-        constant + constant + op('mul'): 1,
-        constant: 3,
-      },
-      mult: {
-        op('mul'): 1
-      },
-      constant.when('domain.size > 0'): {
-        constant(domain='DOMAIN_RANDOM_SUBSET()', depth='depth'): 2,
-        op('input')('RANDOM_INPUT()'): 5,
-        op('const')(0.0): 1,
-        op('const')(1.0): 1,
-        op('const')(math.pi): 1,
-      },
-      constant: {
-        op('const')(0.0): 1,
-        op('const')(1.0): 1,
-        op('const')(math.pi): 1,
-      }
+  def subsample(rng: random.Random, domain):
+    n = rng.randint(1, len(domain))
+    return rng.sample(domain, n)
+
+
+  rules = {
+    expr.when(lambda i, domain, stack: i > 0 and len(domain) > 1): {
+      expr(lambda i: i - 1, domain=subsample) + unop: 1.0,
+    },
+    expr.when(lambda i, domain: i > 0 and len(domain) > 1): {
+      expr(lambda i: i - 1, domain=subsample) + expr(lambda i: i - 1, domain=subsample) + biop: 1.0,
+      constant: lambda i: 1 / (i + 1),
+    },
+    expr.when(lambda domain: len(domain) == 1): op('variable', lambda domain: domain[0]),
+    expr.when(lambda i, domain: i <= 0 and len(domain) > 0): op('variable', lambda domain: domain[0]),
+
+    unop.when(lambda stack: np.std(stack[-1]) < 1.0): op('exp'),
+    unop.when(lambda stack: np.std(stack[-1]) >= 1.0): op('const', lambda stack: 1 / np.std(stack[-1])) + op('mul'),
+
+    biop: {
+      op('add'): 1.0,
+      op('mul'): 1.0,
+    },
+
+    constant: {
+      op('const', 0.0): 1.0,
+      op('const', 1.0): 1.0,
+      op('const', 2.0): 1.0,
     }
-  )
-
-  generator = symgen.GeneratorMachine(
-    *libraries, grammar=grammar,
-    seed_symbol=expr('4', '-1'),
-    source='sym_gen.c', debug=True
-  )
-
-  instructions, instruction_sizes = generator.generate(
-    1234567, 765432, max_depth=10, instruction_limit=1024, expression_limit=8, max_inputs=2,
-  )
-  print(instructions)
-  print(instruction_sizes)
-  c = 0
-  for s in instruction_sizes:
-    print(generator.assembly.disassemble(instructions[c:c+s]))
-    c += s
-
-def test_grammar_args():
-  from symgen.generator import Grammar, symbol, op
-
-  libraries = (symgen.lib.core, symgen.lib.std)
-
-  expr = symbol('expr')('float x')
-
-  grammar = Grammar(
-    rules={
-      expr.when('x > 0.0'): {
-        expr(x='x - 1') + op('const')(2.0) + op('mul'): 1.0,
-        expr() + op('const')(1.0) + op('add'): 0.5
-      },
-      expr: op('const')('(arg_t) { .number = x}')
-    }
-  )
-
-  generator = symgen.GeneratorMachine(
-    *libraries, grammar=grammar,
-    seed_symbol=expr('(float) 3.5'),
-    source='sym_gen.c', debug=False
-  )
-
-  instructions, instruction_sizes = generator.generate(
-    1234567, 765432, max_depth=20, instruction_limit=1024, normal_limit=8, max_inputs=2
-  )
-  c = 0
-  print()
-  for s in instruction_sizes:
-    print(generator.assembly.disassemble(instructions[c:c+s]))
-    c += s
-
-def test_grammar_memory():
-  from symgen.machine import StackMachine
-  from symgen.generator import Grammar, symbol, op
-
-  libraries = (symgen.lib.core, symgen.lib.std)
-
-  expr = symbol('expr')('allocated', 'limit')
-  subexpr = symbol('subexpr')('i')
-  summation = symbol('sum')('i', 'limit')
-
-  grammar = Grammar(
-    rules={
-      expr.when('allocated < limit'): {
-        subexpr(i='allocated') + expr('allocated + 1'): 1,
-      },
-      expr: {
-        summation('0', 'limit'): 1
-      },
-      subexpr: {
-        op('input')('RANDOM_INPUT()') + op('input')('RANDOM_INPUT()') + op('mul') + op('store')('i'): 1,
-      },
-      summation.when('i == 0'): {
-        op('memory')('0') + op('memory')('1') + op('add') + summation('2', 'limit'): 1
-      },
-      summation.when('i < limit'): {
-        op('memory')('i') + op('add') + summation('i + 1', 'limit'): 1
-      },
-      summation: {}
-    }
-  )
-
-  generator = symgen.GeneratorMachine(
-    *libraries, grammar=grammar,
-    seed_symbol=expr('0', '5'),
-    source='sym_gen.c', debug=False
-  )
-
-  instructions, instruction_sizes = generator.generate(
-    1234567, 765432, max_depth=10, instruction_limit=1024, normal_limit=8, max_inputs=4
-  )
-  c = 0
-  print()
-  for s in instruction_sizes:
-    print(generator.assembly.disassemble(instructions[c:c+s]))
-    c += s
-
-  machine = StackMachine(*libraries)
-  n_expr = instruction_sizes.shape[0]
-  n_evals = 3
-  inputs = np.random.randint(low=0, high=10, size=(n_expr, n_evals, 4)).astype(np.float32)
-  outputs = np.zeros(shape=(n_expr, n_evals, 1), dtype=np.float32)
-  machine.execute(instructions, instruction_sizes, inputs, outputs)
-
-  print(outputs)
-
-def test_tmp():
-  import tempfile
-
-  file = tempfile.NamedTemporaryFile('w', prefix='test', delete=True, delete_on_close=False)
-  print(file.name)
-
-  with open(file.name, 'w') as f:
-    f.write('Hello!')
-
-def test_arity():
-  libraries = (symgen.lib.core, symgen.lib.std)
-  assembly = symgen.assembly.Assembly(*libraries)
-
-  arities = {
-    op_name: code.count('POP()')
-    for op_name, code in assembly.ops.items()
   }
 
-  code = ['const', 'const', 'add', 'const', 'add', 'const', 'const', 'add', 'mul']
-  print()
-  print(' '.join(code))
+  generator = GeneratorMachine(lib, rules=rules)
+  machine = symgen.StackMachine(lib, max_stack_size=1024)
 
-  lens = []
-  for op in code:
-    n = arities[op]
-    l = 0
-    for j in range(n):
-      l += lens[len(lens) - l - 1]
+  trace = np.random.normal(size=(3, 8)).astype(np.float32)
 
-    if op == 'store':
-      pass
-    else:
-      l += 1
+  print(np.std(trace, axis=-1))
 
-    lens.append(l)
+  for i in range(15):
+    result, stack, memory = generator(random.Random(i), expr(3), domain=[0, 1, 2], trace=trace)
+    r = machine(result, inputs=trace)
 
-  print(' '.join(str(l) for l in lens))
+    print(result)
 
-  for i, op in enumerate(code):
-    n = arities[op]
-    l = 0
-    args = []
-    for j in range(n):
-      arg_len = lens[i - l - 1]
-      arg = code[i - l - arg_len : i - l]
-      args.append(arg)
-      l += arg_len
-
-    print(op, ', '.join([' '.join(arg) for arg in args]))
+    assert len(stack) == 1
+    assert np.all(np.abs(r[0] - stack[0]) < 1.0e-6)
