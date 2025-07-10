@@ -57,3 +57,53 @@ def test_source():
   g = lambda i: 1 + i
   import dis
   assert dis.Bytecode(f) == dis.Bytecode(g)
+
+def test_sampling():
+  import random
+  n = 1024
+  ps = [random.expovariate() for _ in range(n)]
+
+  rng = random.Random(123)
+
+  def s1(rng, likelihoods):
+
+    u = rng.uniform(0, 1) * sum(likelihoods)
+    c = 0.0
+    for i in range(len(likelihoods)):
+      c += likelihoods[i]
+
+      if c >= u:
+        return i
+
+    raise ValueError
+
+  N = 32 * 1024
+
+  import time
+  start_t = time.perf_counter()
+  for _ in range(N):
+    s1(rng, ps)
+  end_t = time.perf_counter()
+  print(f's1: {N / (end_t - start_t) / 1.0e+6} Miter/sec')
+
+  def s2(likelihoods):
+    return random.choices(range(n), weights=likelihoods)
+
+  import time
+  start_t = time.perf_counter()
+  for _ in range(N):
+    s2(ps)
+  end_t = time.perf_counter()
+  print(f's2: {N / (end_t - start_t)/ 1.0e+6} Miter/sec')
+
+  def s3(likelihoods):
+    ls = np.array(likelihoods)
+    p = ls / np.sum(ls)
+    return np.random.choice(n, p=p, replace=True)
+
+  import time
+  start_t = time.perf_counter()
+  for _ in range(N):
+    s3(ps)
+  end_t = time.perf_counter()
+  print(f's3: {N / (end_t - start_t)/ 1.0e+6} Miter/sec')

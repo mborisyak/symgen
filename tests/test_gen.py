@@ -1,3 +1,4 @@
+import random
 from typing import NamedTuple
 import math
 
@@ -200,41 +201,33 @@ def test_const_grammar():
 def test_simple_grammar():
   import math
   import symgen
-  from symgen.generator import Grammar, symbol, op
+  from symgen.generator import GeneratorMachine, symbol
 
-  libraries = (symgen.lib.core, symgen.lib.std)
+  lib = symgen.lib.merge(symgen.lib.core, symgen.lib.std)
 
-  expr = symbol('expr')()
+  expr = symbol('expr')('i')
   constant = symbol('constant')()
 
-  grammar = Grammar(
-    rules={
-      expr: {
-        expr + expr + op('add'): 0.1,
-        expr + expr + op('mul'): 0.2,
-        constant: 0.6,
-      },
-      constant: {
-        op('const')(0.0): 0.2,
-        op('const')(1.0): 0.2,
-        op('const')(2.0): 0.2,
-        op('const')(math.pi): 0.2,
-        op('const')(math.e): 0.2,
-      }
+  rules={
+    expr: {
+      expr + expr + lib['add']: 0.1,
+      expr + expr + lib['mul']: 0.2,
+      constant: 0.6,
+    },
+    constant: {
+      (lib['const'], 0.0): 0.2,
+      (lib['const'], 1.0): 0.2,
+      (lib['const'], 2.0): 0.2,
+      (lib['const'], math.pi): 0.2,
+      (lib['const'], math.e): 0.2,
     }
-  )
+  }
 
-  generator = symgen.GeneratorMachine(
-    *libraries, grammar=grammar, seed_symbol=expr, debug=False, source='sym_gen.c',
-  )
+  generator = GeneratorMachine(lib, rules=rules,)
 
-  instructions, instruction_sizes = generator.generate(
-    1234567, 765432, max_depth=1024, instruction_limit=1024, expression_limit=1024, max_expression_length=256
-  )
-  offset = 0
-  for s in instruction_sizes:
-    print(generator.assembly.pretty(instructions[offset:offset + s]))
-    offset += s
+  result = generator(random.Random(123), expr(3))
+
+  print(result)
 
 def test_grammar_hash():
   from symgen.generator import Grammar, symbol, op
