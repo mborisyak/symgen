@@ -1,4 +1,4 @@
-from typing import TypeAlias, Callable, Any
+from typing import TypeAlias, Callable, Any, Sequence
 import inspect
 
 import random
@@ -13,12 +13,58 @@ __all__ = [
   'GeneratorMachine'
 ]
 
+Scope: TypeAlias = tuple[Sequence[str], Sequence[str]] | None
+
+def get_scope(f) -> Scope:
+  import inspect
+
+  if not callable(f):
+    return None
+
+  parameters = inspect.signature(f).parameters
+  assert all(p.kind != inspect.Parameter.VAR_POSITIONAL for _, p in parameters.items()), \
+    'functions with variable positional arguments are not allowed'
+
+  assert all(p.kind != inspect.Parameter.POSITIONAL_ONLY for _, p in parameters.items()), \
+    'functions with positional only arguments are not allowed'
+
+  if any(p.kind == inspect.Parameter.VAR_KEYWORD for _, p in parameters.items()):
+    return None
+
+  without_default_value = tuple(name for name, p in parameters.items() if p.default == inspect.Parameter.empty)
+  with_default_value = tuple(name for name, p in parameters.items() if p.default != inspect.Parameter.empty)
+
+  return without_default_value, with_default_value
+
+def apply_with_scope(f, scope: Scope, **kwargs):
+  if not callable(f):
+    return f
+
+  if scope is None:
+    return f(**kwargs)
+
+  without_default_value, with_default_value = scope
+  args = dict()
+
+  for var_name in without_default_value:
+    if var_name not in kwargs:
+      raise ValueError(f'missing required scope variable {var_name}')
+    args[var_name] = kwargs[var_name]
+
+  for var_name in with_default_value:
+    if var_name in kwargs:
+      args[var_name] = kwargs[var_name]
+
+  return f(**args)
+
 class Op(object):
-  __slots__ = ('name', 'arguments')
+  __slots__ = ('name', 'arguments', 'scopes')
 
   def __init__(self, name: str, *arguments: Any):
     self.name = name
     self.arguments = arguments
+    self.scopes = [get_scope(argument) for argument in arguments]
+
 
   def __add__(self, other):
     if isinstance(other, Symbol):
@@ -97,25 +143,12 @@ def condition_str(condition: Callable[..., Any]):
     return f'({params}) -> {hash(condition)}'
 
 class Condition(object):
-  __slots__ = ('definition', 'condition', 'arguments')
+  __slots__ = ('definition', 'condition', 'scope')
 
   def __init__(self, definition: Symbol, condition: Callable[..., bool] | None):
     self.definition = definition
     self.condition = condition
-
-    if condition is None:
-      self.arguments = ()
-    else:
-      signature = inspect.signature(condition)
-      assert all(
-        p.kind not in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL)
-        for _, p in signature.parameters.items()
-      )
-
-      if any(p.kind == inspect.Parameter.VAR_KEYWORD for _, p in signature.parameters.items()):
-        self.arguments = None
-      else:
-        self.arguments = tuple(name for name in signature.parameters)
+    self.scope = get_scope(condition)
 
   def __repr__(self):
     return f'{self.definition.name}.when({condition_str(self.condition)})'
@@ -125,11 +158,12 @@ class Condition(object):
       return self.definition.name
 
 class Invocation(object):
-  __slots__ = ('definition', 'arguments')
+  __slots__ = ('definition', 'arguments', 'scopes')
 
   def __init__(self, definition: Symbol, arguments: dict[str, Callable[..., Any] | Any]):
     self.definition = definition
     self.arguments = arguments
+    self.scopes = {k: get_scope(v) for k, v in arguments.items()}
 
   def __add__(self, other):
     if isinstance(other, Invocation):
@@ -154,7 +188,7 @@ class Invocation(object):
       f'{k}={condition_str(v)}' for k, v in self.arguments.items()
     )
 
-    return f'{self.definition!r}({args})'
+    return f'{self.definition.name}({args})'
 
   @property
   def name(self):
@@ -193,7 +227,7 @@ class Expansion(object):
 
 ExpansionLike: TypeAlias = Expansion | Invocation | Symbol | Op
 TransitionTable: TypeAlias = dict[ExpansionLike, float | Callable[..., float]] | ExpansionLike
-UpcastedTransitionTable: TypeAlias = dict[Expansion, float | Callable[..., float]]
+UpcastedTransitionTable: TypeAlias = dict[Expansion, tuple[float | Callable[..., float], Scope]]
 NormalizedGrammar: TypeAlias = dict[Symbol, dict[Condition, UpcastedTransitionTable]]
 
 def normalize_grammar(rules: dict[Condition | Symbol, TransitionTable]) -> NormalizedGrammar:
@@ -230,7 +264,7 @@ def normalize_grammar(rules: dict[Condition | Symbol, TransitionTable]) -> Norma
         inv() if isinstance(inv, Symbol) else inv
         for inv in expansion
       ))
-      table[expansion] = prob
+      table[expansion] = (prob, get_scope(prob))
 
     if isinstance(condition, Symbol):
       condition = condition.when()
@@ -265,10 +299,6 @@ def check_condition(condition, **kwargs):
   else:
     return condition.condition(*(kwargs[arg] for arg in condition.arguments))
 
-def apply_with_scope(f, **kwargs):
-  signature = inspect.signature(f)
-  return f(**{k: kwargs[k] for k in signature.parameters})
-
 def invoke(
   rng: random.Random,
   invocation: Invocation, local_scope: dict[str, Any], global_scope: dict[str, Any], *,
@@ -277,11 +307,9 @@ def invoke(
   arguments = {}
   global_scope_updated = {}
 
-  for k, v in invocation.arguments.items():
-    if callable(v):
-      value = apply_with_scope(v, **local_scope, **global_scope, rng=rng, inputs=inputs, stack=stack, memory=memory)
-    else:
-      value = v
+  for k in invocation.arguments:
+    f, scope = invocation.arguments[k], invocation.scopes[k]
+    value = apply_with_scope(f, scope, **local_scope, **global_scope, rng=rng, inputs=inputs, stack=stack, memory=memory)
 
     if k in global_scope:
       global_scope_updated[k] = value
@@ -324,6 +352,10 @@ class GeneratorMachine(object):
       for name, operation in self.library.items()
     }
     self.grammar = normalize_grammar(rules)
+    self.op_scopes = {
+      k: get_scope(op)
+      for k, op in self.library.items()
+    }
 
   def __call__(
     self, rng: random.Random, seed_symbol: Symbol | Invocation, *,
@@ -344,22 +376,26 @@ class GeneratorMachine(object):
       memory = None
 
     transition_rules = self.grammar[seed_symbol.definition]
-    active_rules = [
-      (expansion, prob)
+    active_tables = [
+      table
       for condition, table in transition_rules.items()
-      for expansion, prob in table.items()
-      if check_condition(
-        condition, **seed_symbol.arguments, **global_scope,
+      if condition.condition is None or apply_with_scope(
+        condition.condition, condition.scope, **seed_symbol.arguments, **global_scope,
         rng=rng, inputs=trace, stack=stack, memory=memory
       )
     ]
 
+    if len(active_tables) == 0:
+      raise ValueError(f'Uncaught condition {seed_symbol} (global: {global_scope}).')
+
+    active_rules = [(expansion, prob) for table in active_tables for expansion, prob in table.items()]
+
     if len(active_rules) == 0:
-      raise ValueError(f'Uncaught condition {seed_symbol.arguments} (global: {global_scope}).')
+      return [], stack, memory
 
     likelihoods = [
-      apply_with_scope(prob, **seed_symbol.arguments, **global_scope, rng=rng, stack=stack, memory=memory) if callable(prob) else prob
-      for _, prob in active_rules
+      apply_with_scope(prob, scope, **seed_symbol.arguments, **global_scope, rng=rng, stack=stack, memory=memory) if callable(prob) else prob
+      for _, (prob, scope) in active_rules
     ]
 
     index = sample(rng, likelihoods)
@@ -370,8 +406,11 @@ class GeneratorMachine(object):
       if isinstance(term, Op):
         assert term.name in self.library, f'unknown op {term.name}'
         arguments = [
-          apply_with_scope(v, **seed_symbol.arguments, **global_scope, rng=rng, stack=stack, memory=memory, inputs=trace) if callable(v) else v
-          for v in term.arguments
+          apply_with_scope(
+            v, scope, **seed_symbol.arguments, **global_scope,
+            rng=rng, stack=stack, memory=memory, inputs=trace
+          )
+          for v, scope in zip(term.arguments, term.scopes)
         ]
         result.append((term.name, *arguments))
 
