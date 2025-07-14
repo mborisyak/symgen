@@ -13,7 +13,7 @@ __all__ = [
   'GeneratorMachine'
 ]
 
-Scope: TypeAlias = tuple[Sequence[str], Sequence[str]] | None
+Scope: TypeAlias = Sequence[str] | None
 
 def get_scope(f) -> Scope:
   import inspect
@@ -31,40 +31,65 @@ def get_scope(f) -> Scope:
   if any(p.kind == inspect.Parameter.VAR_KEYWORD for _, p in parameters.items()):
     return None
 
-  without_default_value = tuple(name for name, p in parameters.items() if p.default == inspect.Parameter.empty)
-  with_default_value = tuple(name for name, p in parameters.items() if p.default != inspect.Parameter.empty)
+  scope = tuple(name for name, p in parameters.items())
 
-  return without_default_value, with_default_value
+  return scope
 
-def apply_with_scope(f, scope: Scope, **kwargs):
+def apply_with_scope(f, scope: Scope, *contexts):
   if not callable(f):
     return f
 
   if scope is None:
-    return f(**kwargs)
+    return f(**{k: v for context in contexts for k, v in context.items()})
 
-  without_default_value, with_default_value = scope
   args = dict()
 
-  for var_name in without_default_value:
-    if var_name not in kwargs:
-      raise ValueError(f'missing required scope variable {var_name}')
-    args[var_name] = kwargs[var_name]
-
-  for var_name in with_default_value:
-    if var_name in kwargs:
-      args[var_name] = kwargs[var_name]
+  for var_name in scope:
+    for context in contexts:
+      if var_name in context:
+        args[var_name] = context[var_name]
+        continue
 
   return f(**args)
 
+def merge_local_definitions(
+  local: dict[str, Callable[..., Any]], local_scope: dict[str, Scope],
+  additional: dict[str, Callable[..., Any]]
+):
+  combined = {k: v for k, v in local.items()}
+  combined_scopes = {k: v for k, v in local_scope.items()}
+
+  for k in additional:
+    if k in combined:
+      raise ValueError(f'local context variable {k} is already defined')
+    else:
+      combined[k] = additional[k]
+      combined_scopes[k] = get_scope(additional[k])
+
+  return combined, combined_scopes
+
+def get_local_context(local, local_scopes, *contexts):
+  local_context = {}
+  for k in local:
+    local_context[k] = apply_with_scope(local[k], local_scopes[k], local_context, *contexts)
+
+  return local_context
+
 class Op(object):
-  __slots__ = ('name', 'arguments', 'scopes')
+  __slots__ = ('name', 'argument', 'scope', 'local', 'local_scopes', 'checks', 'check_scopes')
 
-  def __init__(self, name: str, *arguments: Any):
+  def __init__(
+    self, name: str, argument: Any,
+    local: dict[str, Callable[..., Any]], local_scopes: dict[str, Scope],
+    checks: Sequence[Callable[..., bool]], check_scopes: Sequence[Scope]
+  ):
     self.name = name
-    self.arguments = arguments
-    self.scopes = [get_scope(argument) for argument in arguments]
-
+    self.argument = argument
+    self.scope = get_scope(argument)
+    self.local = local
+    self.local_scopes = local_scopes
+    self.checks = checks
+    self.check_scopes = check_scopes
 
   def __add__(self, other):
     if isinstance(other, Symbol):
@@ -81,28 +106,97 @@ class Op(object):
         'expansion should include only instances Invocation or Symbol (eqv. to invocation w/o arguments)'
       )
 
-class Symbol(object):
-  __slots__ = ('name', 'arguments', )
+  def __call__(self, *contexts):
+    if self.argument is None:
+      return (self.name, )
+    else:
+      local_context = get_local_context(self.local, self.local_scopes, *contexts)
 
-  def __init__(self, name, *arguments: str):
+      argument = apply_with_scope(self.argument, self.scope, *contexts, local_context)
+      return self.name, argument
+
+  def where(self, **local: Callable[..., Any]):
+    merged, merged_scopes = merge_local_definitions(self.local, self.local_scopes, local)
+    return Op(self.name, self.argument, merged, merged_scopes, self.checks, self.check_scopes)
+
+  def assure(self, *checks):
+    scopes = [get_scope(check) for check in checks]
+
+    return Op(
+      self.name, self.argument, self.local, self.local_scopes,
+      [*self.checks, *checks], [*self.check_scopes, *scopes]
+    )
+
+  def check(self, *contexts):
+    local_context = get_local_context(self.local, self.local_scopes, *contexts)
+
+    return all(
+      apply_with_scope(check, scope, *contexts, local_context)
+      for check, scope in zip(self.checks, self.check_scopes)
+    )
+
+class Symbol(object):
+  __slots__ = ('name', 'local', 'local_scopes', 'auto_updates', 'auto_update_scopes', 'checks', 'check_scopes')
+
+  def __init__(
+    self, name,
+    local: dict[str, Callable[..., Any]], local_scopes: dict[str, Scope],
+    auto_updates: dict[str, Callable[..., Any]], auto_update_scopes: dict[str, Scope],
+    checks: Sequence[Callable[..., bool]], check_scopes: Sequence[Scope]
+  ):
     self.name = name
-    self.arguments = arguments
+
+    self.local = local
+    self.local_scopes = local_scopes
+
+    self.auto_updates = auto_updates
+    self.auto_update_scopes = auto_update_scopes
+
+    self.checks = checks
+    self.check_scopes = check_scopes
 
   def __repr__(self):
-    return f'symbol({self.name})({", ".join(str(x) for x in self.arguments)})'
+    return f'symbol({self.name})'
 
   def when(self, condition: Callable[..., bool] | None=None) -> 'Condition':
-    return Condition(self, condition)
+    return Condition(self, condition, {}, {}, self.checks, self.check_scopes)
 
-  def __call__(self, *args: Any, **kwargs: Any) -> 'Invocation':
-    assert len(args) <= len(self.arguments), 'too many arguments'
+  def where(self, **local):
+    combined, combined_scopes = merge_local_definitions(self.local, self.local_scopes, local)
+    return Symbol(
+      self.name, combined, combined_scopes,
+      self.auto_updates, self.auto_update_scopes,
+      self.checks, self.check_scopes
+    )
 
-    arguments = dict(zip(self.arguments, args))
-    for k, v in kwargs.items():
-      assert k not in arguments, f'The argument {k} is already passed as a positional argument'
-      arguments[k] = v
+  def assure(self, *checks):
+    scopes = [get_scope(check) for check in checks]
 
-    return Invocation(self, arguments)
+    return Symbol(
+      self.name, self.local, self.local_scopes,
+      self.auto_updates, self.auto_update_scopes,
+      [*self.checks, *checks], [*self.check_scopes, *scopes]
+    )
+
+  def auto(self, **updates: Callable[..., Any]):
+    scopes = {k: get_scope(v) for k, v in updates.items()}
+
+    return Symbol(
+      self.name, self.local, self.local_scopes,
+      {**self.auto_updates, **updates}, {**self.auto_update_scopes, **scopes},
+      self.checks, self.check_scopes
+    )
+
+  def __call__(self, **kwargs: Any) -> 'Invocation':
+    arguments = {**kwargs}
+    scopes = {k: get_scope(v) for k, v in kwargs.items()}
+
+    for k in self.auto_updates:
+      if k not in arguments:
+        arguments[k] = self.auto_updates[k]
+        scopes[k] = self.auto_update_scopes[k]
+
+    return Invocation(self, arguments, scopes, self.local, self.local_scopes, self.checks, self.check_scopes)
 
   def __add__(self, other):
     if isinstance(other, Symbol):
@@ -120,13 +214,10 @@ class Symbol(object):
       )
 
 def symbol(name: str):
-  def constructor(*arguments: str):
-    return Symbol(name, *arguments)
+  return Symbol(name, {}, {}, {}, {}, [], [])
 
-  return constructor
-
-def op(name: str, *arguments: Any):
-  return Op(name, *arguments)
+def op(name: str, argument: Any = None):
+  return Op(name, argument, {}, {}, [], [])
 
 def condition_str(condition: Callable[..., Any]):
   if not callable(condition):
@@ -138,32 +229,105 @@ def condition_str(condition: Callable[..., Any]):
   )
 
   if hasattr(condition, '__code__'):
-    return f'({params}) -> {condition.__code__.hex()}'
+    return f'({params}) -> {condition.__code__}'
   else:
     return f'({params}) -> {hash(condition)}'
 
 class Condition(object):
-  __slots__ = ('definition', 'condition', 'scope')
+  __slots__ = ('definition', 'condition', 'scope', 'local', 'local_scopes', 'checks', 'check_scopes')
 
-  def __init__(self, definition: Symbol, condition: Callable[..., bool] | None):
+  def __init__(
+    self, definition: Symbol, condition: Callable[..., bool] | None,
+    local: dict[str, Callable[..., Any]], local_scopes: dict[str, Scope],
+    checks: Sequence[Callable[..., bool]], check_scopes: Sequence[Scope]
+  ):
     self.definition = definition
     self.condition = condition
     self.scope = get_scope(condition)
 
+    self.local = local
+    self.local_scopes = local_scopes
+
+    self.checks = checks
+    self.check_scopes = check_scopes
+
+  def where(self, **local):
+    combined, combined_scopes = merge_local_definitions(self.local, self.local_scopes, local)
+    return Condition(self.definition, self.condition, combined, combined_scopes, self.checks, self.check_scopes)
+
   def __repr__(self):
-    return f'{self.definition.name}.when({condition_str(self.condition)})'
+    return f'{self.definition!r}.when({condition_str(self.condition)})'
 
   @property
   def name(self):
       return self.definition.name
 
-class Invocation(object):
-  __slots__ = ('definition', 'arguments', 'scopes')
+  def __call__(self, *contexts) -> bool:
+    if self.condition is None:
+      return True
+    else:
+      local_context = get_local_context(self.local, self.local_scopes, *contexts)
+      return apply_with_scope(self.condition, self.scope, local_context, *contexts)
 
-  def __init__(self, definition: Symbol, arguments: dict[str, Callable[..., Any] | Any]):
+  def assure(self, *checks):
+    scopes = [get_scope(check) for check in checks]
+
+    return Condition(
+      self.name, self.condition, self.local, self.local_scopes,
+      [*self.checks, *checks], [*self.check_scopes, *scopes]
+    )
+
+  def check(self, *contexts):
+    # if len(self.checks) == 0:
+    #   return True
+
+    local_context = get_local_context(self.local, self.local_scopes, *contexts)
+
+    results = [
+      apply_with_scope(check, scope, *contexts, local_context)
+      for check, scope in zip(self.checks, self.check_scopes)
+    ]
+
+    return all(results)
+
+class NonTerminal(object):
+  __slots__ = ('definition', 'context', 'local_context', 'checks', 'check_scopes')
+
+  def __init__(self, definition, context, local_context, checks, check_scopes):
     self.definition = definition
+    self.context = context
+    self.local_context = local_context
+    self.checks = checks
+    self.check_scopes = check_scopes
+
+  def check(self, *contexts):
+    return all(
+      apply_with_scope(check, scope, *contexts, self.local_context)
+      for check, scope in zip(self.checks, self.check_scopes)
+    )
+
+  def __repr__(self):
+    return f'{self.definition.name}({self.context, self.local_context})'
+
+class Invocation(object):
+  __slots__ = ('definition', 'arguments', 'scopes', 'local', 'local_scopes', 'checks', 'check_scopes')
+
+  def __init__(
+    self, definition: Symbol,
+    arguments: dict[str, Callable[..., Any] | Any], scopes: dict[str, Scope],
+    local: dict[str, Callable[..., Any]], local_scopes: dict[str, Scope],
+    checks: Sequence[Callable[..., bool]], check_scopes: Sequence[Scope]
+  ):
+    self.definition = definition
+
     self.arguments = arguments
-    self.scopes = {k: get_scope(v) for k, v in arguments.items()}
+    self.scopes = scopes
+
+    self.local = local
+    self.local_scopes = local_scopes
+
+    self.checks = checks
+    self.check_scopes = check_scopes
 
   def __add__(self, other):
     if isinstance(other, Invocation):
@@ -193,6 +357,40 @@ class Invocation(object):
   @property
   def name(self):
     return self.definition.name
+
+  def __call__(self, context: dict[str, Any], auto_context: dict[str, Any]) -> NonTerminal:
+    context_updated = {}
+    local_context = get_local_context(self.local, self.local_scopes, context, auto_context)
+
+    for k in self.arguments:
+      f, scope = self.arguments[k], self.scopes[k]
+      context_updated[k] = apply_with_scope(f, scope, context, auto_context, local_context)
+
+    for k in context:
+      if k not in context_updated:
+        context_updated[k] = context[k]
+
+    return NonTerminal(
+      self.definition, context=context_updated, local_context=local_context,
+      checks=self.checks, check_scopes=self.check_scopes
+    )
+
+  def assure(self, *checks):
+    scopes = [get_scope(check) for check in checks]
+
+    return Invocation(
+      self.definition, arguments=self.arguments, scopes=self.scopes,
+      local=self.local, local_scopes=self.local_scopes,
+      checks=[*self.checks, *checks], check_scopes=[*self.check_scopes, *scopes]
+    )
+
+  def where(self, **local):
+    combined, combined_scopes = merge_local_definitions(self.local, self.local_scopes, local)
+    return Invocation(
+      self.definition, self.arguments, self.scopes,
+      combined, combined_scopes,
+      self.checks, self.check_scopes
+    )
 
 class Expansion(object):
   __slots__ = ('invocations',)
@@ -267,7 +465,7 @@ def normalize_grammar(rules: dict[Condition | Symbol, TransitionTable]) -> Norma
       table[expansion] = (prob, get_scope(prob))
 
     if isinstance(condition, Symbol):
-      condition = condition.when()
+      condition = condition.when().where(**condition.local)
     elif isinstance(condition, Condition):
       pass
     else:
@@ -282,52 +480,12 @@ def normalize_grammar(rules: dict[Condition | Symbol, TransitionTable]) -> Norma
         f'Expected a Symbol, got {definition}.'
       )
 
-    if definition not in transitions:
-      transitions[definition] = dict()
+    if definition.name not in transitions:
+      transitions[definition.name] = dict()
 
-    transitions[definition][condition] = table
+    transitions[definition.name][condition] = table
 
   return transitions
-
-def check_condition(condition, **kwargs):
-  if condition.condition is None:
-    return True
-
-  elif condition.arguments is None:
-    return condition.condition(**kwargs)
-
-  else:
-    return condition.condition(*(kwargs[arg] for arg in condition.arguments))
-
-def invoke(
-  rng: random.Random,
-  invocation: Invocation, local_scope: dict[str, Any], global_scope: dict[str, Any], *,
-  inputs: np.ndarray[np.float32], stack: list[np.ndarray[np.float32]] | None, memory: dict[int, np.ndarray[np.float32]]
-):
-  arguments = {}
-  global_scope_updated = {}
-
-  for k in invocation.arguments:
-    f, scope = invocation.arguments[k], invocation.scopes[k]
-    value = apply_with_scope(f, scope, **local_scope, **global_scope, rng=rng, inputs=inputs, stack=stack, memory=memory)
-
-    if k in global_scope:
-      global_scope_updated[k] = value
-    else:
-      arguments[k] = value
-
-  for k in invocation.definition.arguments:
-    if k not in arguments:
-      if k in local_scope:
-        arguments[k] = local_scope[k]
-      else:
-        raise ValueError(f'Invocation context does not contain argument {k}.')
-
-  for k in global_scope:
-    if k not in global_scope_updated:
-      global_scope_updated[k] = global_scope[k]
-
-  return invocation.definition(**arguments), global_scope_updated
 
 def sample(rng: random.Random, likelihoods):
   norm = sum(likelihoods)
@@ -340,6 +498,8 @@ def sample(rng: random.Random, likelihoods):
 
   return len(likelihoods) - 1
 
+class CheckFailed(Exception):
+  pass
 
 class GeneratorMachine(object):
   def __init__(
@@ -358,93 +518,165 @@ class GeneratorMachine(object):
     }
 
   def __call__(
-    self, rng: random.Random, seed_symbol: Symbol | Invocation, *,
-    trace: np.ndarray[np.float32] | None=None,
+    self, rng: random.Random, seed: Symbol | Invocation | NonTerminal, *,
+    inputs: np.ndarray[np.float32] | None=None, attempts: int | None = None
+  ):
+    return self.generate(rng, seed, inputs=inputs, attempts=attempts)
+
+  def generate(
+    self, rng: random.Random, seed: Symbol | Invocation | NonTerminal, *,
+    inputs: np.ndarray[np.float32] | None = None,
+    attempts: int | None = None
+  ):
+    if inputs is None:
+      stack = None
+      memory = None
+    else:
+      stack = []
+      memory = {}
+
+    if isinstance(seed, Symbol):
+      seed = seed()({}, {'rng': rng, 'stack': stack, 'memory': memory, 'inputs': inputs})
+
+    elif isinstance(seed, Invocation):
+      seed = seed({}, {'rng': rng, 'stack': stack, 'memory': memory, 'inputs': inputs})
+
+    return self._generate(
+      rng, seed,
+      inputs=inputs, stack=stack, memory=memory,
+      attempts=attempts
+    )
+
+  def _expand_operation(
+    self, rng: random.Random, term: Op, context: dict[str, Any],
+    inputs: np.ndarray[np.float32] | None=None,
     stack: list[np.ndarray[np.float32]] | None=None,
     memory: dict[int, np.ndarray[np.float32]] | None = None,
-    **global_scope
+    attempts: int | None=None
   ):
-    if isinstance(seed_symbol, Symbol):
-      seed_symbol = seed_symbol()
+    assert term.name in self.library, f'unknown op {term.name}'
 
-    result = []
-    if trace is not None:
+    attempts = 1 if attempts is None else attempts
+
+    for _ in range(attempts):
+      attempt_stack = None if stack is None else stack.copy()
+      attempt_memory = None if memory is None else memory.copy()
+      attempt_autocontext = {'rng': rng, 'stack': attempt_stack, 'memory': attempt_memory, 'inputs': inputs}
+
+      operation, *operation_args = term(context, attempt_autocontext)
+
+      if inputs is not None:
+        arity, scope = self.properties[term.name]
+        args = [attempt_stack.pop() for _ in range(arity)]
+
+        kwargs = {}
+        if 'inputs' in scope:
+          kwargs['inputs'] = inputs
+        if 'memory' in scope:
+          kwargs['memory'] = attempt_memory
+        if 'argument' in scope:
+          kwargs['argument'], = operation_args
+
+        if 'out' in scope:
+          _, *batch = inputs.shape
+          out = np.ndarray(shape=batch, dtype=inputs.dtype)
+          self.library[term.name](*args, **kwargs, out=out)
+          attempt_stack.append(out)
+        else:
+          out = self.library[term.name](*args, **kwargs)
+          if out is not None:
+            attempt_stack.append(out)
+
+        # attempt_autocontext['stack'] = attempt_stack
+        # attempt_autocontext['memory'] = attempt_memory
+
+      if term.check(context, attempt_autocontext):
+        return (operation, *operation_args), attempt_stack, attempt_memory
+
+    raise ValueError('Maximal number of attempts reached.')
+
+  def _generate(
+    self, rng: random.Random, seed: NonTerminal, *,
+    inputs: np.ndarray[np.float32] | None=None,
+    stack: list[np.ndarray[np.float32]] | None=None,
+    memory: dict[int, np.ndarray[np.float32]] | None = None,
+    attempts: int | None=None
+  ):
+    _rng = random.Random(rng.getrandbits(16))
+
+    if inputs is not None:
       stack = list() if stack is None else [x for x in stack]
       memory = dict() if memory is None else {k: v for k, v in memory.items()}
     else:
       stack = None
       memory = None
 
-    transition_rules = self.grammar[seed_symbol.definition]
+    auto_context = {
+      'rng': _rng,
+      'inputs': inputs,
+      'stack': stack,
+      'memory': memory,
+    }
+
+    transition_rules = self.grammar[seed.definition.name]
     active_tables = [
-      table
+      (condition, table)
       for condition, table in transition_rules.items()
-      if condition.condition is None or apply_with_scope(
-        condition.condition, condition.scope, **seed_symbol.arguments, **global_scope,
-        rng=rng, inputs=trace, stack=stack, memory=memory
-      )
+      if condition(seed.context, seed.local_context, auto_context)
     ]
 
     if len(active_tables) == 0:
-      raise ValueError(f'Uncaught condition {seed_symbol} (global: {global_scope}).')
+      raise ValueError(f'Uncaught condition {seed}.')
 
-    active_rules = [(expansion, prob) for table in active_tables for expansion, prob in table.items()]
+    active_rules = [(condition, expansion, prob) for condition, table in active_tables for expansion, prob in table.items()]
 
     if len(active_rules) == 0:
       return [], stack, memory
 
     likelihoods = [
-      apply_with_scope(prob, scope, **seed_symbol.arguments, **global_scope, rng=rng, stack=stack, memory=memory) if callable(prob) else prob
-      for _, (prob, scope) in active_rules
+      apply_with_scope(prob, scope, seed.context, seed.local_context, auto_context)
+      for _, _, (prob, scope) in active_rules
     ]
 
-    index = sample(rng, likelihoods)
+    if attempts is None:
+      attempts = 1
 
-    expansion, _ = active_rules[index]
+    for attempt in range(attempts):
+      result = []
 
-    for term in expansion:
-      if isinstance(term, Op):
-        assert term.name in self.library, f'unknown op {term.name}'
-        arguments = [
-          apply_with_scope(
-            v, scope, **seed_symbol.arguments, **global_scope,
-            rng=rng, stack=stack, memory=memory, inputs=trace
+      index = sample(_rng, likelihoods)
+      active_condition, expansion, _ = active_rules[index]
+
+      attempt_stack = None if stack is None else stack.copy()
+      attempt_memory = None if memory is None else memory.copy()
+
+      for term in expansion:
+        if isinstance(term, Op):
+          assert term.name in self.library, f'unknown op {term.name}'
+
+          op, attempt_stack, attempt_memory = self._expand_operation(
+            _rng, term, seed.context, inputs=inputs, stack=attempt_stack, memory=attempt_memory,
+            attempts=attempts
           )
-          for v, scope in zip(term.arguments, term.scopes)
-        ]
-        result.append((term.name, *arguments))
+          result.append(op)
 
-        if trace is not None:
-          arity, scope = self.properties[term.name]
-          args = [stack.pop() for _ in range(arity)]
+        elif isinstance(term, Invocation):
+          attempt_auto_context = {'rng': _rng, 'inputs': inputs, 'stack': attempt_stack, 'memory': attempt_memory}
+          nonterminal = term(seed.context, attempt_auto_context)
 
-          kwargs = {}
-          if 'inputs' in scope:
-            kwargs['inputs'] = trace
-          if 'memory' in scope:
-            kwargs['memory'] = memory
-          if 'argument' in scope:
-            kwargs['argument'], = arguments
+          terms, attempt_stack, attempt_memory = self._generate(
+            _rng, seed=nonterminal,
+            inputs=inputs, stack=attempt_stack, memory=attempt_memory, attempts=attempts
+          )
+          result.extend(terms)
 
-          if 'out' in scope:
-            _, *batch = trace.shape
-            out = np.ndarray(shape=batch, dtype=np.float32)
-            self.library[term.name](*args, **kwargs, out=out)
-            stack.append(out)
-          else:
-            out = self.library[term.name](*args, **kwargs)
-            if out is not None:
-              stack.append(out)
-      else:
-        concrete_invocation, global_scope_updated = invoke(
-          rng, term, seed_symbol.arguments, global_scope,
-          inputs=trace, stack=stack, memory=memory
-        )
+        else:
+          raise ValueError('Improperly normalized transition table!')
 
-        terms, stack, memory = self(
-          rng, seed_symbol=concrete_invocation, **global_scope_updated,
-          trace=trace, stack=stack, memory=memory
-        )
-        result.extend(terms)
+      attempt_auto_context = {'rng': _rng, 'inputs': inputs, 'stack': attempt_stack, 'memory': attempt_memory}
 
-    return result, stack, memory
+      if seed.check(seed.context, attempt_auto_context):
+        if active_condition.check(seed.context, attempt_auto_context):
+          return result, attempt_stack, attempt_memory
+
+    raise ValueError('Maximal number of generation attempts reached.')

@@ -1,35 +1,14 @@
-import math
-
 import symgen
 import numpy as np
 
-def test_name():
-  import re
-  def get_name(x: str):
-    name_re = re.compile(r'([^[]*\s+)?(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)(\s*\[.*])?\s*')
-    return name_re.fullmatch(x).group('name')
-
-  assert get_name('abc') == 'abc'
-  assert get_name('long _abc') == '_abc'
-  assert get_name('unsigned long _0abc') == '_0abc'
-  assert get_name('unsigned long * _0abc') == '_0abc'
-  assert get_name('unsigned long _0abc[]') == '_0abc'
-  assert get_name('unsigned long abc77[]') == 'abc77'
-  assert get_name('unsigned long abc77[5]') == 'abc77'
-  assert get_name('unsigned long abc78[onother array[6]]') == 'abc78'
-  assert get_name('unsigned long __[static 1024]') == '__'
-
-def test_normal():
-  u = np.random.uniform(size=(1024 * 1024, 10))
-  sigma = np.sqrt(1 / 12)
-  u = (np.sum(u, axis=-1) - 5) / np.sqrt(10) / sigma
-
-  print(np.mean(u), np.std(u))
-
 def test_eval():
   machine = symgen.StackMachine(
-    symgen.lib.core, symgen.lib.std, debug=True, source='test_eval.c'
+    symgen.lib.core, symgen.lib.std,
   )
+
+  result = machine('(0) (0) mul (1) (1) mul add sqrt', np.array([3.0, 4.0]))
+
+  print(result, result.shape)
 
   def evaluate(expression, *args):
     result = machine.evaluate(expression, *args)
@@ -47,72 +26,58 @@ def test_eval():
 
   assert abs(evaluate('1.0 2.0 div', ) - 2.0) < 1.0e-6
 
-  binary = machine.assembly.assemble('(0) (0) mul (1) (1) mul add sqrt')
-  print(binary.T)
-  disassembled = machine.assembly.disassemble(binary)
-  print(disassembled)
-
   print()
 
 def test_execute():
   from symgen import StackMachine, lib
-  machine = StackMachine(
-    lib.core, lib.std, debug=True, source='test_eval.c'
-  )
-  binary = machine.assembly.assemble('(0) (0) mul (1) (1) mul add sqrt (0) (1) add')
-  sizes = np.array([binary.shape[0]], dtype=np.int32)
-  inputs = np.arange(10, dtype=np.float32).reshape((1, 5, 2))
-  outputs = np.ndarray(shape=(1, 5, 2), dtype=np.float32)
+  machine = StackMachine(lib.core, lib.std)
 
-  machine.execute(binary, sizes, inputs, outputs)
-  print(outputs)
+  outputs = machine.evaluate('(0) (0) mul (1) (1) mul add sqrt (0) (1) add', 2, 3)
+  assert np.abs(outputs[0] - np.sqrt(4 + 9)) < 1.0e-3
+  assert np.abs(outputs[1] - 5) < 1.0e-3
 
 def test_expression():
-  assembly = symgen.assembly.Assembly(symgen.lib.core, symgen.lib.std)
+  machine = symgen.StackMachine(symgen.lib.core, symgen.lib.std)
   code = '(0) 1.5 add {0} [0] [0] mul'
-  machine_code = assembly.assemble(code)
-  print(machine_code)
-  recovered = [assembly.op_names[i] for i in machine_code[:, 0]]
-  assert recovered == ['input', 'const', 'add', 'store', 'memory', 'memory', 'mul']
+  parsed = machine.parse(code)
 
-  print(assembly.disassemble(machine_code))
+  recovered = [op for op, *_ in parsed]
+  assert recovered == ['variable', 'const', 'add', 'store', 'load', 'load', 'mul']
+
+  print(machine.parse('1.0 2.0 add'))
+
 
 def test_performance():
   import time
-  machine = symgen.StackMachine(
-    symgen.lib.core, symgen.lib.std, debug=False, source='test_eval.c', max_stack_size=2048
-  )
-  n_b, m, n = 16 * 1024, 64, 32
+  machine = symgen.StackMachine(symgen.lib.core, symgen.lib.std)
+  n_b, n_repeat, n = 16 * 1024, 64, 32
   code = ' '.join(f'({i}) ({n + i}) mul' for i in range(n)) + ' ' + ' '.join('add' for _ in range(n - 1))
-  code = machine.assembly.assemble(code)
+  code = machine.parse(code)
 
-  print(4 * n)
-
-  # inputs = np.random.normal(size=(n_b, 1024, 2 * n)).astype(np.float32)
-  inputs = np.ones(shape=(n_b, m, 2 * n), dtype=np.float32) * np.arange(m, dtype=np.float32)[None, :, None]
-  sizes = np.array([code.shape[0] for _ in range(n_b)], dtype=np.int32)
-  code = np.concatenate([code for _ in range(n_b)], axis=0)
-
-  outputs = np.ndarray(shape=(n_b, m, 1), dtype=np.float32)
+  inputs = np.arange(2 * n * n_b, dtype=np.float32).reshape((2 * n, n_b))
+  outputs = np.ndarray(shape=(1, n_b), dtype=np.float32)
 
   symgen_start_t = time.perf_counter()
-  machine.execute(code, sizes, inputs, outputs)
+  for i in range(n_repeat):
+    machine(code, inputs, out=outputs)
   symgen_end_t = time.perf_counter()
 
+  np_outputs = np.ndarray(shape=(1, n_b), dtype=np.float32)
   numpy_start_t = time.perf_counter()
-  numpy_output = np.sum(inputs[:, :, :n] * inputs[:, :, n:], axis=-1, keepdims=True)
+  for i in range(n_repeat):
+    np.sum(inputs[:, :n] * inputs[:, n:], axis=0, keepdims=True, out=np_outputs)
   numpy_end_t = time.perf_counter()
 
-  ops = n_b * m * (2 * n + n - 1)
+  ops = n_b * (2 * n + n - 1)
 
-  eval_output = np.ndarray(shape=(n_b, m, 1), dtype=np.float32)
+  eval_output = np.ndarray(shape=(1, n_b), dtype=np.float32)
   code = ' + '.join(f'arg[{i}] * arg[{n + i}]' for i in range(n))
   ast = compile(code, filename='<string>', mode='eval')
 
   eval_start_t = time.perf_counter()
-  for i in range(n_b):
-    for j in range(m):
-      eval_output[i, j, 0] = eval(ast, {}, {'arg': inputs[i, j]})
+  for i in range(n_repeat):
+    for j in range(n_b):
+      eval_output[0, j] = eval(ast, {}, {'arg': inputs[j]})
   eval_end_t = time.perf_counter()
 
   numpy_eval_output = np.ndarray(shape=(n_b, m, 1), dtype=np.float32)

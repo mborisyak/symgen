@@ -9,14 +9,15 @@ __all__ = [
 ]
 
 
-def const(*, inputs, argument):
-  return np.tile(argument, reps=inputs.shape[1:], )
+def const(*, argument, out):
+  out[:] = argument
+  return
 
 def variable(*, inputs, argument, out):
   out[:] = inputs[argument]
   return
 
-def retrieve(*, memory, argument, out):
+def load(*, memory, argument, out):
   out[:] = memory[argument]
   return
 
@@ -27,15 +28,20 @@ def store(x, *, memory, argument):
 core = dict(
   const=const,
   variable=variable,
-  retrieve=retrieve,
+  load=load,
   store=store
 )
 
 std = dict(
-  add=lambda x, y, *, out: np.add(x, y, out=out),
-  mul=lambda x, y, *, out: np.multiply(x, y, out=out),
-  exp=lambda x, *, out: np.exp(x, out=out),
-  sqrt=lambda x, *, out: np.sqrt(x, out=out),
+  add=lambda x, y, *, out=None: np.add(x, y, out=out),
+  sub=lambda x, y, *, out=None: np.subtract(x, y, out=out),
+  mul=lambda x, y, *, out=None: np.multiply(x, y, out=out),
+  div=lambda x, y, *, out=None: np.divide(x, y, out=out),
+  neg=lambda x, *, out=None: np.negative(x, out=out),
+  inv=lambda x, *, out=None: np.reciprocal(x, out=out),
+  log=lambda x, *, out=None: np.log(x, out=out),
+  exp=lambda x, *, out=None: np.exp(x, out=out),
+  sqrt=lambda x, *, out=None: np.sqrt(x, out=out),
 )
 
 stable = dict(

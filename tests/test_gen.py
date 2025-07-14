@@ -3,229 +3,175 @@ from typing import NamedTuple
 import math
 
 import numpy as np
+from treescope import display
 
 import symgen
 
-class P(NamedTuple):
-  x: float = 1
-  y: float = 1
+def test_dsl():
+  from symgen.generator import symbol, op, Condition
 
-def test_mega_grammar():
-  import symgen
-  from symgen.generator import Grammar, symbol, op
+  s = symbol('s')
 
-  libraries = (symgen.lib.core, symgen.lib.std)
-  expr = symbol('expr')()
+  invocation = s(k=lambda i, j: i + j).where(j=lambda i: i + 1)
+  result = invocation({'i': 1}, {'i': 1})
+  print(result)
+  assert set(result.arguments.keys()) == {'i', 'k'}
+  assert result.arguments['i'] == 1
+  assert result.arguments['k'] == 3
 
-  normal = symbol('normal')('complexity', 'mem_from', 'mem_to')
-  small = symbol('small')('complexity', 'mem_from', 'mem_to')
-  large = symbol('large')('complexity', 'mem_from', 'mem_to')
-
-  normal_positive = symbol('normal_positive')('complexity', 'mem_from', 'mem_to')
-  small_positive = symbol('small_positive')('complexity', 'mem_from', 'mem_to')
-  large_positive = symbol('large_positive')('complexity', 'mem_from', 'mem_to')
-
-  constant_depth = 3
-
-  constant_grammar = symgen.grammars.scale.ConstantGrammar()
-
-  rules = {
-    expr:
-      normal(3, -1, -1) + op('store')(0) + normal(3, 0, 1) + op('store')(1) +
-        normal(3, 0, 2) + op('store')(2) + normal(3, 0, 3) + op('store')(3) +
-        normal(5, 0, 4),
-
-    **constant_grammar.rules(),
-
-    **symgen.grammars.scale.scale_grammar(
-      small, normal, large,
-      small_positive, normal_positive, large_positive,
-      constant_grammar.small(complexity=constant_depth),
-      constant_grammar.normal(complexity=constant_depth),
-      constant_grammar.large(complexity=constant_depth),
-      constant_grammar.small_positive(complexity=constant_depth),
-      constant_grammar.normal_positive(complexity=constant_depth),
-      constant_grammar.large_positive(complexity=constant_depth),
-    ),
-
-    small: {
-      normal + op('sigmoid'): 1.0,
-      normal + op('erf'): 1.0,
-      normal + op('tanh'): 1.0
-    },
-
-    normal.when('mem_from >= 0'): {
-      op('input')('RANDOM_INPUT()'): 'domain.size',
-      op('memory')('RANDOM_MEMORY_RANGE(mem_from, mem_to)'): 'mem_to - mem_from',
-    },
-
-    ### just in case
-    normal: {
-      op('input')('RANDOM_INPUT()'): 1.0,
-    },
-
-    large: {
-      normal() + op('exp'): 1.0,
-      normal() + op('square'): 1.0,
-      normal() + normal() + op('mul'): 3.0,
-    },
-
-    small_positive: normal + op('sigmoid'),
-
-    normal_positive.when('mem_from >= 0'): {
-      op('input')('RANDOM_INPUT()') + op('softplus'): 'domain.size',
-      op('memory')('RANDOM_MEMORY_RANGE(mem_from, mem_to)') + op('softplus'): 'mem_to - mem_from',
-    },
-
-    normal_positive: {
-      op('input')('RANDOM_INPUT()') + op('softplus'): 'domain.size',
-    },
-
-    large_positive: {
-      normal() + op('exp'): 1.0,
-      normal() + op('square'): 1.0,
-    }
-  }
-
-  generator = symgen.GeneratorMachine(
-    *libraries, grammar=Grammar(rules), seed_symbol=expr(), maximal_number_of_inputs=2,
-    source='mega.c'
-  )
-
-  instructions, instruction_sizes = generator.generate(
-    1234567, 765432, max_depth=1024, instruction_limit=32 * 1024, expression_limit=1024, max_expression_length=1024,
-    max_inputs=2
-  )
-  offset = 0
-  disassembled = []
-  for s in instruction_sizes:
-    formula = generator.assembly.pretty(instructions[offset:offset + s])
-    disassembled.append(formula)
-    print(formula)
-    offset += s
-
-  n, = instruction_sizes.shape
-  m_ = 16
-  m = m_ * m_
-  xs1 = np.linspace(-3, 3, num=m_, dtype=np.float32)
-  xs2 = np.linspace(-3, 3, num=m_, dtype=np.float32)
-  Xs1, Xs2 = np.meshgrid(np.linspace(-3, 3, num=m_, dtype=np.float32), np.linspace(-3, 3, num=m_, dtype=np.float32), indexing='ij')
-  xs = np.stack([Xs1.ravel(), Xs2.ravel()], axis=-1)
-  xs = np.broadcast_to(xs[None, :, :], shape=(n, m, 2))
-  print(xs.shape)
-  ys = np.ndarray(shape=(n, m, 1), dtype=np.float32)
-
-  machine = symgen.StackMachine(*libraries)
-  machine.execute(instructions, instruction_sizes, xs, ys)
-
-  import matplotlib.pyplot as plt
-  k = 5
-  fig = plt.figure(figsize=(3 * k, 3 * k))
-  axes = fig.subplots(k, k, squeeze=False).ravel()
-
-  for i in range(k * k):
-    # axes[i].set_title(f'{disassembled[i]}')
-    axes[i].contourf(xs1, xs2, ys[i, :, 0].reshape((m_, m_)))
-
-  fig.tight_layout()
-  fig.savefig('samples.png')
-  plt.close()
-
-  print('===')
-  for i in range(n):
-    if not np.all(np.isfinite(ys[i, :, :])):
-      print(disassembled[i])
-      if np.any(np.isnan(ys[i, :, :])):
-        index = np.where(np.any(np.isnan(ys[i, :, :]), axis=-1))
-        print('nan at', xs[i][index])
-
-      if np.any(np.isinf(ys[i, :, :])):
-        index = np.where(np.any(np.isinf(ys[i, :, :]), axis=-1))
-        print('nan at', xs[i][index])
-
-def test_const_grammar():
-  from symgen import symbol, op, GeneratorMachine, StackMachine, Grammar
-
-  libraries = (symgen.lib.core, symgen.lib.std)
+  condition = s.when(lambda k: k == 5).where(j=lambda i: 2 * i).where(k=lambda j: j + 1)
+  assert isinstance(condition, Condition)
+  assert condition({'i': 2})
+  assert not condition({'i': 1})
+  assert not condition({'i': 3})
 
 
+  stack = [
+    np.random.normal(size=(128, ))
+  ]
+  result = op('mul', lambda stack: 1 / np.std(stack[-1]))({'stack' : stack})
+  assert len(result) == 2
+  assert result[0] == 'mul'
+  assert np.abs(result[1] - 1 / np.std(stack[0])) < 1.0e-3
 
-  generator = symgen.GeneratorMachine(
-    *libraries, grammar=Grammar(rules), seed_symbol=normal(constant_depth), maximal_number_of_inputs=2,
-    source='const.c'
-  )
+  assert s.assure(lambda stack: np.std(stack) < 2.0)(stack=stack).check(stack=stack)
+  assert not s.assure(lambda stack: np.std(stack) < 0.1)(stack=stack).check(stack=stack)
 
-  instructions, instruction_sizes = generator.generate(
-    1234567, 765432, max_depth=1024, instruction_limit=1024 * 1024, expression_limit=1024, max_expression_length=1024,
-    max_inputs=2
-  )
+  assert s.assure(lambda std: std < 2.0).where(std=lambda stack: np.std(stack))(stack=stack).check(stack=stack)
+  assert not s.assure(lambda std: std < 0.1).where(std=lambda stack: np.std(stack))(stack=stack).check(stack=stack)
 
-  n, = instruction_sizes.shape
-  m = 128
-  xs = np.random.normal(size=(n, 1, 2)).astype(np.float32)
-  print(xs.shape)
-  ys = np.ndarray(shape=(n, 1, 1), dtype=np.float32)
+  s_auto = s.auto(i=lambda i, j: i + j + 1)
 
-  machine = symgen.StackMachine(*libraries)
-  machine.execute(instructions, instruction_sizes, xs, ys)
+  assert s_auto(j=lambda j: j + 1)(None, i=1, j=10).arguments['i'] == 12
+  assert s_auto(j=lambda j: j + 1, i=lambda i, j: i + 2 * j + 2)(None, i=1, j=10).arguments['i'] == 23
 
-  offset = 0
-  disassembled = []
-  for i, s in enumerate(instruction_sizes):
-    formula = generator.assembly.pretty(instructions[offset:offset + s])
-    disassembled.append(formula)
-    print(ys[i, 0, 0,], '=', formula)
-    offset += s
-
-  print('\n=============\n')
-  for i in range(n):
-    if not np.all(np.isfinite(ys[i, :, :])):
-      print(ys[i, 0, 0], '=', disassembled[i])
-
-  print('\n=============\n')
-
-  index = np.argsort(np.abs(ys[:, 0, 0]))
-  for i in index[-10:]:
-    print(ys[i, 0, 0], '=', disassembled[i])
-
-  import matplotlib.pyplot as plt
-  fig = plt.figure(figsize=(6, 9))
-  axes = fig.subplots()
-  ys = ys[:, 0, 0]
-  axes.hist(ys, histtype='step', bins=100)
-
-  fig.tight_layout()
-  fig.savefig('consts.png')
-  plt.close()
-
-def test_simple_grammar():
+def test_auto():
   import symgen
   from symgen.generator import GeneratorMachine, symbol, op
 
   lib = symgen.lib.merge(symgen.lib.core, symgen.lib.std)
 
-  expr = symbol('expr')('i')
-  constant = symbol('constant')()
+  limit = 3
 
-  rules={
-    expr.when(lambda i: i > 0): {
-      expr(lambda i: i - 1) + expr(lambda i: i - 1) + op('add'): 1.0,
-      expr(lambda i: i - 1) + expr(lambda i: i - 1) + op('mul'): 1.0,
-      constant: lambda i: 1 / (i + 1),
-    },
-    expr.when(lambda i: i <= 0) : constant(),
-    constant: {
-      op('const', 0.0): 1.0,
-      op('const', 1.0): 1.0,
-      op('const', 2.0): 1.0,
-    }
+  expr = symbol('expr').auto(depth=lambda depth: depth + 1)
+
+  rules = {
+    expr.when(lambda depth: depth < limit): expr + expr + op('add'),
+    expr.when(lambda depth: depth >= limit): op('variable', 0),
   }
 
-  generator = GeneratorMachine(lib, rules=rules,)
+  generator = symgen.GeneratorMachine(lib, rules=rules)
 
-  result = generator(random.Random(123), expr(3))
+  expression = generator(random.Random(1234), expr(depth=0))
 
-  print(result)
+  print(expression)
+
+  assert len(expression) == 2 ** (limit + 1) - 1
+
+def test_local():
+  import symgen
+  from symgen.generator import GeneratorMachine, symbol, op
+
+  lib = symgen.lib.merge(symgen.lib.core, symgen.lib.std)
+  limit = 3
+
+  expr = symbol('expr').where(t1=lambda i: 2 * i + 1).auto(counter=lambda counter: counter + 1)
+  rules = {
+    expr.when(lambda i: i < limit): expr(i=lambda t1, t2: t1 + t2).where(t2=lambda t1, i: t1 - 3 * i - 1),
+    expr.when(lambda t1: t1 >= 2 * limit + 1): op('const', lambda t1, counter: counter + t1),
+  }
+
+  generator = symgen.GeneratorMachine(lib, rules=rules)
+  expression = generator(random.Random(1234), expr(i=0, counter=0))
+
+  assert len(expression) == 1
+  (_, arg), = expression
+
+  assert arg == limit + 2 * limit + 1
+
+def test_fibonacci():
+  from symgen.generator import symbol
+  s = symbol('s')
+
+  inv = s(i=lambda i, j: i + j, j=lambda i: i)
+  state = s(i=1, j=1)
+
+  for _ in range(10):
+    print(state)
+    state = inv(None, **state.arguments)
+
+def test_context_passing():
+  from symgen.generator import symbol
+  s = symbol('s')
+
+  inv = s(i=lambda i, j: i + j)
+  state = dict(i=1, j=2)
+  state = inv(dict(i=1, j=2), defaults=state)
+
+  assert state.arguments['i'] == 3
+  assert state.arguments['j'] == 2
+
+def test_tracing():
+  from symgen.generator import GeneratorMachine, symbol, op
+
+  def display(*, argument):
+    means, stds, memory_means, memory_stds = argument
+    stack_ = ', '.join(f'{m:.2f} +- {s:.2f}' for m, s in zip(means, stds))
+    memory_ = ', '.join(f'{k}: {memory_means[k]:.2f} +- {memory_stds[k]:.2f}' for k in memory_means)
+    print(f'[{stack_}], {{{memory_}}}')
+
+  def statistics(means, stds, memory_means, memory_stds):
+    return means, stds, memory_means, memory_stds
+
+  debug_lib = {
+    'tracer': display
+  }
+
+  expr = symbol('expr').where(
+    means=lambda stack: [float(np.mean(v)) for v in stack],
+    stds=lambda stack:  [float(np.std(v)) for v in stack],
+    memory_means = lambda memory: {k: float(np.mean(v)) for k, v in memory.items()},
+    memory_stds = lambda memory: {k: float(np.std(v)) for k, v in memory.items()},
+  )
+  inspect = op('tracer', statistics)
+
+  rules = {
+    expr: (
+      inspect + op('variable', 0) + inspect + op('variable', 1) + inspect +
+      op('store', 1) + inspect + op('store', 0) + inspect +
+      op('load', 1) + inspect + op('load', 0) + inspect + op('add') + inspect
+    )
+  }
+
+  inputs = np.random.normal(size=(2, 1024))
+  inputs[0] *= 2
+  inputs[1] *= 0.5
+
+  inputs[0] -= 1
+  inputs[1] += 1.5
+
+  generator = GeneratorMachine(symgen.lib.std, symgen.lib.core, debug_lib, rules=rules)
+  expression = generator(random.Random(1), expr(), inputs=inputs)
+
+  means = [term[1][0] for term in expression if term[0] == 'tracer']
+  stds = [term[1][1] for term in expression if term[0] == 'tracer']
+  mmeans = [term[1][2] for term in expression if term[0] == 'tracer']
+  mstds = [term[1][3] for term in expression if term[0] == 'tracer']
+
+  assert [len(x) for x in means] == [0, 1, 2, 1, 0, 1, 2, 1]
+  assert [len(x) for x in stds] == [0, 1, 2, 1, 0, 1, 2, 1]
+  assert [len(x) for x in mmeans] == [0, 0, 0, 1, 2, 2, 2, 2]
+  assert [len(x) for x in mstds] == [0, 0, 0, 1, 2, 2, 2, 2]
+
+def test_invocation():
+  from symgen.generator import symbol
+  s = symbol('s')
+
+  inv = s(i=2, j=3, c=4)
+
+  print(inv({}, {}))
+
+  print(s()(dict(i=2, j=3, c=4), {} ))
 
 def test_scope():
   import symgen
@@ -233,10 +179,10 @@ def test_scope():
 
   lib = symgen.lib.merge(symgen.lib.core, symgen.lib.std)
 
-  expr = symbol('expr')('i')
-  unop = symbol('unop')()
-  biop = symbol('biop')()
-  constant = symbol('constant')()
+  expr = symbol('expr')
+  unop = symbol('unop')
+  biop = symbol('biop')
+  constant = symbol('constant')
 
   def subsample(rng: random.Random, domain):
     n = rng.randint(1, len(domain))
@@ -245,17 +191,17 @@ def test_scope():
 
   rules = {
     expr.when(lambda i, domain, stack: i > 0 and len(domain) > 1): {
-      expr(lambda i: i - 1, domain=subsample) + unop: 1.0,
+      expr(i=lambda i: i - 1, domain=subsample) + unop: 1.0,
     },
     expr.when(lambda i, domain: i > 0 and len(domain) > 1): {
-      expr(lambda i: i - 1, domain=subsample) + expr(lambda i: i - 1, domain=subsample) + biop: 1.0,
+      expr(i=lambda i: i - 1, domain=subsample) + expr(i=lambda i: i - 1, domain=subsample) + biop: 1.0,
       constant: lambda i: 1 / (i + 1),
     },
     expr.when(lambda domain: len(domain) == 1): op('variable', lambda domain: domain[0]),
     expr.when(lambda i, domain: i <= 0 and len(domain) > 0): op('variable', lambda domain: domain[0]),
 
     unop.when(lambda stack: np.std(stack[-1]) < 1.0): op('exp'),
-    unop.when(lambda stack: np.std(stack[-1]) >= 1.0): op('const', lambda stack: 1 / np.std(stack[-1])) + op('mul'),
+    unop.when(lambda stack: np.std(stack[-1]) >= 1.0): op('const', lambda std: 1 / std).where(std=lambda stack: np.std(stack[-1])) + op('mul'),
 
     biop: {
       op('add'): 1.0,
@@ -277,10 +223,54 @@ def test_scope():
   print(np.std(trace, axis=-1))
 
   for i in range(15):
-    result, stack, memory = generator(random.Random(i), expr(3), domain=[0, 1, 2], trace=trace)
+    result, stack, memory = generator.generate(random.Random(i), expr(i=3, domain=[0, 1, 2]), inputs=trace)
     r = machine(result, inputs=trace)
 
     print(result)
 
     assert len(stack) == 1
     assert np.all(np.abs(r[0] - stack[0]) < 1.0e-6)
+
+def test_attempt():
+  import symgen
+  from symgen.generator import GeneratorMachine, symbol, op
+
+  lib = symgen.lib.merge(symgen.lib.core, symgen.lib.std)
+
+  expr = symbol('expr')
+  c = symbol('c')
+
+  rules = {
+    expr.assure(lambda std: std < 1.0).where(std=lambda stack: np.std(stack[-1])): op('variable', 0) + c + op('mul'),
+    c: op('const', lambda rng: rng.expovariate())
+  }
+
+  generator = GeneratorMachine(lib, rules=rules)
+  trace = np.random.normal(size=(1, 128)).astype(np.float32)
+  trace = (1 + 1.0e-3) * trace / np.std(trace)
+
+  rng = random.Random(12345)
+
+  for i in range(15):
+    result, stack, memory = generator.generate(rng, expr(), inputs=trace, attempts=16)
+
+    assert len(result) == 3
+    _, const, _ = result
+
+    assert const[0] == 'const'
+    assert const[1] < 1.0
+
+  n, m = 1024, 3
+  raises = 0
+  for i in range(n):
+    try:
+      result, stack, memory = generator.generate(rng, expr(), inputs=trace, attempts=m)
+    except ValueError:
+      raises += 1
+
+  expected = 0
+  for _ in range(n):
+    expected += 0 if any(rng.expovariate() < 1.0 for _ in range(m)) else 1
+
+  print(f'{raises} / {expected}')
+  assert 0.5 * expected < raises < 2 * expected

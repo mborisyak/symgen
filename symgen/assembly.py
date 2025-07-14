@@ -104,37 +104,6 @@ class Assembly(object):
       for k, code in self.ops.items()
     )
 
-  def assemble(self, code: str):
-    instructions = code.split()
-
-    machine_code = np.ndarray(shape=(len(instructions), 2), dtype=np.int32)
-    float_view = np.ndarray(shape=(len(instructions), 2), dtype=np.float32, buffer=machine_code)
-
-    for i, instruction in enumerate(instructions):
-      if instruction in self.op_codes:
-        machine_code[i, 0] = self.op_codes[instruction]
-        machine_code[i, 1] = 0
-      elif instruction.startswith('(') and instruction.endswith(')'):
-        addr = int(instruction[1:-1])
-        machine_code[i, 0] = self.op_codes['input']
-        machine_code[i, 1] = addr
-      elif instruction.startswith('[') and instruction.endswith(']'):
-        addr = int(instruction[1:-1])
-        machine_code[i, 0] = self.op_codes['memory']
-        machine_code[i, 1] = addr
-      elif instruction.startswith('{') and instruction.endswith('}'):
-        addr = int(instruction[1:-1])
-        machine_code[i, 0] = self.op_codes['store']
-        machine_code[i, 1] = addr
-      else:
-        try:
-          value = float(instruction)
-          machine_code[i, 0] = self.op_codes['const']
-          float_view[i, 1] = value
-        except ValueError as e:
-          raise ValueError(f'instruction is not understood: {instruction}') from e
-
-    return machine_code
 
   def disassemble(self, code: np.ndarray[np.int32]):
     operators = list()

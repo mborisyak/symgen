@@ -146,3 +146,100 @@ def test_alloc():
 
   print(f'{(end_t - start_t) * 1.0e+3:.2f} millisec')
 
+def test_scope():
+  import inspect, time
+
+  def get_scope(f):
+    return tuple(name for name in inspect.signature(f).parameters)
+
+  def f(x, y, z):
+    return x * y - z
+
+  def f2(x, y, z, **_):
+    return x * y - z
+
+  n = 4 * 1024 * 1024
+  context = {'a': 16, 'b': 25, 'x': 2, 'y': 3, 'z': 4, 'zzz': 999, 'yyy': {1, 2, 3, 4, 5}}
+
+  def scoped(f):
+    _scope = get_scope(f)
+
+    def g(**kwargs):
+      return f(**{k: kwargs[k] for k in _scope})
+
+    return g
+
+  def scoped2(f):
+    _scope = get_scope(f)
+
+    def g(kwargs):
+      return f(**{k: kwargs[k] for k in _scope})
+
+    return g
+
+  start_t = time.perf_counter()
+  for _ in range(n):
+    _ = f2(**context)
+  end_t = time.perf_counter()
+
+  print(f'kwargs: {n / (end_t - start_t) / 1.0e+6} Mops')
+
+  scoped_f = scoped(f)
+  scoped_f2 = scoped2(f)
+
+  start_t = time.perf_counter()
+  for _ in range(n):
+    _ = scoped_f(**context)
+  end_t = time.perf_counter()
+
+  print(f'wrapper: {n / (end_t - start_t) / 1.0e+6} Mops')
+
+  start_t = time.perf_counter()
+  for _ in range(n):
+    _ = scoped_f2(context)
+  end_t = time.perf_counter()
+
+  print(f'wrapper2: {n / (end_t - start_t) / 1.0e+6} Mops')
+
+  scope = get_scope(f)
+
+  start_t = time.perf_counter()
+  for _ in range(n):
+    _ = f(**{k: context[k] for k in scope})
+  end_t = time.perf_counter()
+
+  print(f'manual: {n / (end_t - start_t) / 1.0e+6} Mops')
+
+  class Scoped(object):
+    def __init__(self, f):
+      self.f = f
+      self.scope = get_scope(f)
+
+    def __call__(self, **kwargs):
+      return f(**{k: context[k] for k in scope})
+
+  scoped_obj = Scoped(f)
+
+  start_t = time.perf_counter()
+  for _ in range(n):
+    _ = scoped_obj(**context)
+  end_t = time.perf_counter()
+
+  print(f'class: {n / (end_t - start_t) / 1.0e+6} Mops')
+
+  class Scoped2(object):
+    def __init__(self, f):
+      self.f = f
+      self.scope = get_scope(f)
+
+    def __call__(self, kwargs):
+      return f(**{k: context[k] for k in scope})
+
+  scoped_obj2 = Scoped2(f)
+
+  start_t = time.perf_counter()
+  for _ in range(n):
+    _ = scoped_obj2(context)
+  end_t = time.perf_counter()
+
+  print(f'class2: {n / (end_t - start_t) / 1.0e+6} Mops')
