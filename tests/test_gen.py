@@ -274,3 +274,189 @@ def test_attempt():
 
   print(f'{raises} / {expected}')
   assert 0.5 * expected < raises < 2 * expected
+
+def test_self_normalizing_grammar():
+  from symgen import symbol, op, GeneratorMachine, StackMachine
+  from scipy import optimize
+
+  def aff_add(x, y, *, argument):
+    wx, wy, b = argument
+    return wx * x + wy * y + b
+
+  def add_normalization(rng: random.Random, stack):
+    wx = rng.normalvariate()
+    wy = rng.normalvariate()
+
+    z = wx * stack[-1] + wy * stack[-2]
+    mz, sz = np.mean(z), np.std(z)
+
+    return wx / sz, wy / sz, -mz / sz
+
+  def aff_mul(x, y, *, argument):
+    w, b = argument
+    return w * x * y + b
+
+  def mul_normalization(stack):
+    z = stack[-1] * stack[-2]
+    mz, sz = np.mean(z), np.std(z)
+
+    return 1 / sz, -mz / sz
+
+  def aff_div(x, y, *, argument):
+    w, b = argument
+    return w * x / y + b
+
+  def div_normalization(stack):
+    z = stack[-1] / stack[-2]
+    mz, sz = np.mean(z), np.std(z)
+
+    return 1 / sz, -mz / sz
+
+  def aff_exp(x, *, argument):
+    w, b = argument
+    return np.exp(x + w) + b
+
+  def pos_exp_normalization(rng, stack):
+    z = np.exp(stack[-1])
+    sz = np.std(z)
+
+    return -np.log(sz), rng.expovariate()
+
+  def exp_normalization(stack):
+    z = np.exp(stack[-1])
+    mz, sz = np.mean(z), np.std(z)
+
+    return -np.log(sz), -mz / sz
+
+  def aff_wexp(x, *, argument):
+    c, w, b = argument
+    return w * np.exp(c * x) + b
+
+  def wexp_normalization(rng, stack):
+    c = rng.normalvariate()
+    z = np.exp(c * stack[-1])
+    mz, sz = np.mean(z), np.std(z)
+
+    return c, 1 / sz, -mz / sz
+
+  def aff_log(x, *, argument):
+    c, w, b = argument
+
+    return w * np.log(x + c) + b
+
+
+  def log_normalization(rng: random.Random, stack):
+    c = rng.expovariate()
+
+    z = np.log(stack[-1] + c)
+    mz, sz = np.mean(z), np.std(z)
+
+    return c, 1 / sz, -mz / sz
+
+  def aff_square(x, *, argument):
+    c, w, b = argument
+
+    return w * np.square(x + c) + b
+
+  def square_normalization(rng: random.Random, stack):
+    c = rng.normalvariate()
+
+    z = np.square(stack[-1] + c)
+    mz, sz = np.mean(z), np.std(z)
+
+    return c, 1 / sz, -mz / sz
+
+  def pos_square_normalization(rng: random.Random, stack):
+    c = rng.normalvariate()
+
+    z = np.square(stack[-1] + c)
+    sz = np.std(z)
+
+    return c, 1 / sz, 0.0
+
+  normalized_ops = {
+    'aff_add': aff_add,
+    'aff_mul': aff_mul,
+    'aff_div': aff_div,
+    'aff_exp': aff_exp,
+    'aff_wexp': aff_wexp,
+    'aff_log': aff_log,
+    'aff_square': aff_square
+  }
+
+  expression = symbol('expression')
+  unbounded = symbol('unbounded').auto(depth=lambda depth: depth - 1)
+  positive = symbol('positive').auto(depth=lambda depth: depth - 1)
+
+  rules = {
+    expression: (
+        unbounded(mem=[]) + op('store', 0) +
+        unbounded(mem=[0, ]) + op('store', 1) +
+        unbounded(mem=[0, 1]) + op('store', 2) +
+        unbounded(mem=[0, 1, 2]) #+ unbounded(mem=[0, 1, 2])
+    ),
+    unbounded.when(lambda depth: depth > 0): {
+      unbounded() + unbounded() + op('aff_add', add_normalization): 1.0,
+      unbounded() + unbounded() + op('aff_mul', mul_normalization): 1.0,
+      positive() + unbounded() + op('aff_div', div_normalization): 1.0,
+      unbounded() + op('aff_wexp', wexp_normalization): 1.0,
+      positive() + op('aff_log', log_normalization): 1.0,
+      unbounded() + op('aff_square', square_normalization): 1.0
+    },
+    positive.when(lambda depth: depth > 0): {
+      unbounded() + op('aff_exp', pos_exp_normalization): 1.0,
+      unbounded() + op('aff_square', pos_square_normalization): 1.0
+    },
+    unbounded.when(lambda depth: depth <= 0): {
+      op('variable', lambda rng, inputs: rng.randint(0, inputs.shape[0] - 1)): 2.0,
+      op('load', lambda rng, mem: rng.randint(0, len(mem) - 1)): (lambda mem: len(mem))
+    },
+    positive.when(lambda depth: depth <= 0): unbounded() + op('aff_exp', pos_exp_normalization),
+  }
+  libs = (symgen.lib.core, symgen.lib.std, normalized_ops)
+  machine = StackMachine(*libs)
+  generator = GeneratorMachine(*libs, rules=rules)
+
+  py_rng = random.Random(12345678)
+  np_rng = np.random.default_rng(12345678)
+
+  grid_x = np.linspace(-5, 5, num=129)
+  grid_y = np.linspace(-5, 5, num=127)
+  grid = np.stack(np.meshgrid(grid_x, grid_y, indexing='ij'), axis=0)
+
+  n = 5
+  inputs = np_rng.normal(size=(2, 1024))
+  expressions = [
+    generator(py_rng, seed=expression(depth=3), inputs=grid)
+    for _ in range(n * n)
+  ]
+
+  results = []
+  for expr in expressions:
+    # assert len(expr) <= 2 * (2 ** 6 - 1)
+    result = machine(expr, inputs=grid)
+
+    # assert result.shape == (2, 1024)
+
+    if not np.all(np.isfinite(result)):
+      trace = machine.trace(expr, inputs=grid)
+
+      for tr, term in zip(trace, expr):
+        if not np.all(np.isfinite(tr)):
+          print(term)
+
+    results.append(result)
+
+  import matplotlib.pyplot as plt
+  fig = plt.figure(figsize=(4 * n, 3 * n))
+  axes = fig.subplots(n, n, squeeze=False).ravel()
+
+  for i in range(n * n):
+    # axes[i].scatter(results[i][0], results[i][1])
+    c = axes[i].contourf(grid_x, grid_y, results[i][0].T)
+    plt.colorbar(c, ax=axes[i])
+
+  fig.tight_layout()
+  fig.savefig('self-normalizing-grammar.png')
+  plt.close(fig)
+

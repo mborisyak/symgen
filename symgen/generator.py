@@ -541,11 +541,13 @@ class GeneratorMachine(object):
     elif isinstance(seed, Invocation):
       seed = seed({}, {'rng': rng, 'stack': stack, 'memory': memory, 'inputs': inputs})
 
-    return self._generate(
+    expression, _, _ = self._generate(
       rng, seed,
       inputs=inputs, stack=stack, memory=memory,
       attempts=attempts
     )
+
+    return expression
 
   def _expand_operation(
     self, rng: random.Random, term: Op, context: dict[str, Any],
