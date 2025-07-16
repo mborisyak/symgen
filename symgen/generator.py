@@ -48,7 +48,7 @@ def apply_with_scope(f, scope: Scope, *contexts):
     for context in contexts:
       if var_name in context:
         args[var_name] = context[var_name]
-        continue
+        break
 
   return f(**args)
 
@@ -213,6 +213,11 @@ class Symbol(object):
         'expansion should include only instances Invocation or Symbol (eqv. to invocation w/o arguments)'
       )
 
+  def seed(self, **arguments) -> 'NonTerminal':
+    local_context = get_local_context(self.local, self.local_scopes, arguments)
+    return NonTerminal(self, arguments, local_context, self.checks, self.check_scopes)
+
+
 def symbol(name: str):
   return Symbol(name, {}, {}, {}, {}, [], [])
 
@@ -267,6 +272,8 @@ class Condition(object):
       return True
     else:
       local_context = get_local_context(self.local, self.local_scopes, *contexts)
+      if contexts[0].get('i') == 3:
+        pass
       return apply_with_scope(self.condition, self.scope, local_context, *contexts)
 
   def assure(self, *checks):
@@ -278,8 +285,8 @@ class Condition(object):
     )
 
   def check(self, *contexts):
-    # if len(self.checks) == 0:
-    #   return True
+    if len(self.checks) == 0:
+      return True
 
     local_context = get_local_context(self.local, self.local_scopes, *contexts)
 

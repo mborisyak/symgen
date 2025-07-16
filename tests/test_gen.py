@@ -1,9 +1,6 @@
 import random
-from typing import NamedTuple
-import math
 
 import numpy as np
-from treescope import display
 
 import symgen
 
@@ -15,9 +12,9 @@ def test_dsl():
   invocation = s(k=lambda i, j: i + j).where(j=lambda i: i + 1)
   result = invocation({'i': 1}, {'i': 1})
   print(result)
-  assert set(result.arguments.keys()) == {'i', 'k'}
-  assert result.arguments['i'] == 1
-  assert result.arguments['k'] == 3
+  assert set(result.context.keys()) == {'i', 'k'}
+  assert result.context['i'] == 1
+  assert result.context['k'] == 3
 
   condition = s.when(lambda k: k == 5).where(j=lambda i: 2 * i).where(k=lambda j: j + 1)
   assert isinstance(condition, Condition)
@@ -34,16 +31,10 @@ def test_dsl():
   assert result[0] == 'mul'
   assert np.abs(result[1] - 1 / np.std(stack[0])) < 1.0e-3
 
-  assert s.assure(lambda stack: np.std(stack) < 2.0)(stack=stack).check(stack=stack)
-  assert not s.assure(lambda stack: np.std(stack) < 0.1)(stack=stack).check(stack=stack)
-
-  assert s.assure(lambda std: std < 2.0).where(std=lambda stack: np.std(stack))(stack=stack).check(stack=stack)
-  assert not s.assure(lambda std: std < 0.1).where(std=lambda stack: np.std(stack))(stack=stack).check(stack=stack)
-
   s_auto = s.auto(i=lambda i, j: i + j + 1)
 
-  assert s_auto(j=lambda j: j + 1)(None, i=1, j=10).arguments['i'] == 12
-  assert s_auto(j=lambda j: j + 1, i=lambda i, j: i + 2 * j + 2)(None, i=1, j=10).arguments['i'] == 23
+  assert s_auto(j=lambda j: j + 1)(dict(i=1, j=10), {}).context['i'] == 12
+  assert s_auto(j=lambda j: j + 1, i=lambda i, j: i + 2 * j + 2)(dict(i=1, j=10), {}).context['i'] == 23
 
 def test_auto():
   import symgen
@@ -75,14 +66,14 @@ def test_local():
   lib = symgen.lib.merge(symgen.lib.core, symgen.lib.std)
   limit = 3
 
-  expr = symbol('expr').where(t1=lambda i: 2 * i + 1).auto(counter=lambda counter: counter + 1)
+  expr = symbol('expr').where(t1=lambda i: 2 * i + 1).auto(counter=lambda counter: counter + 1, t1=lambda i: 2 * i + 1)
   rules = {
     expr.when(lambda i: i < limit): expr(i=lambda t1, t2: t1 + t2).where(t2=lambda t1, i: t1 - 3 * i - 1),
-    expr.when(lambda t1: t1 >= 2 * limit + 1): op('const', lambda t1, counter: counter + t1),
+    expr.when(lambda t1: t1 >= 2 * limit + 1): op('const', lambda i, counter: counter),
   }
 
   generator = symgen.GeneratorMachine(lib, rules=rules)
-  expression = generator(random.Random(1234), expr(i=0, counter=0))
+  expression = generator(random.Random(1234), expr.seed(i=0, counter=0))
 
   assert len(expression) == 1
   (_, arg), = expression
@@ -293,51 +284,42 @@ def test_self_normalizing_grammar():
     return wx / sz, wy / sz, -mz / sz
 
   def aff_mul(x, y, *, argument):
-    w, b = argument
-    return w * x * y + b
+    cx, cy, w, b = argument
+    return w * (x + cx) * (y + cy) + b
 
-  def mul_normalization(stack):
-    z = stack[-1] * stack[-2]
+  def mul_normalization(rng: random.Random, stack):
+    cx, cy = rng.normalvariate(), rng.normalvariate()
+
+    z = (stack[-1] + cx) * (stack[-2] + cy)
     mz, sz = np.mean(z), np.std(z)
 
-    return 1 / sz, -mz / sz
+    return cx, cy, 1 / sz, -mz / sz
 
   def aff_div(x, y, *, argument):
-    w, b = argument
-    return w * x / y + b
+    cx, cy, w, b = argument
+    return w * (x + cx) / (y + cy) + b
 
-  def div_normalization(stack):
-    z = stack[-1] / stack[-2]
+  def div_normalization(rng: random.Random, stack):
+    cx, cy = rng.normalvariate(), rng.expovariate(1.0)
+    z = (stack[-1] + cx) / (stack[-2] + cy)
     mz, sz = np.mean(z), np.std(z)
 
-    return 1 / sz, -mz / sz
+    return cx, cy, 1 / sz, -mz / sz
 
   def aff_exp(x, *, argument):
-    w, b = argument
-    return np.exp(x + w) + b
-
-  def pos_exp_normalization(rng, stack):
-    z = np.exp(stack[-1])
-    sz = np.std(z)
-
-    return -np.log(sz), rng.expovariate()
-
-  def exp_normalization(stack):
-    z = np.exp(stack[-1])
-    mz, sz = np.mean(z), np.std(z)
-
-    return -np.log(sz), -mz / sz
-
-  def aff_wexp(x, *, argument):
     c, w, b = argument
-    return w * np.exp(c * x) + b
+    return np.exp(c * x + w) + b
 
-  def wexp_normalization(rng, stack):
+  def exp_normalization(rng: random.Random, stack):
     c = rng.normalvariate()
     z = np.exp(c * stack[-1])
     mz, sz = np.mean(z), np.std(z)
 
-    return c, 1 / sz, -mz / sz
+    return c, -np.log(sz), -mz / sz
+
+  def pos_exp_normalization(rng: random.Random, stack):
+    c, w, b = exp_normalization(rng, stack)
+    return c, w, max(0.0, b)
 
   def aff_log(x, *, argument):
     c, w, b = argument
@@ -346,7 +328,7 @@ def test_self_normalizing_grammar():
 
 
   def log_normalization(rng: random.Random, stack):
-    c = rng.expovariate()
+    c = rng.expovariate(1.0)
 
     z = np.log(stack[-1] + c)
     mz, sz = np.mean(z), np.std(z)
@@ -367,19 +349,15 @@ def test_self_normalizing_grammar():
     return c, 1 / sz, -mz / sz
 
   def pos_square_normalization(rng: random.Random, stack):
-    c = rng.normalvariate()
+    c, w, b = square_normalization(rng, stack)
 
-    z = np.square(stack[-1] + c)
-    sz = np.std(z)
-
-    return c, 1 / sz, 0.0
+    return c, w, max(0.0, b)
 
   normalized_ops = {
     'aff_add': aff_add,
     'aff_mul': aff_mul,
     'aff_div': aff_div,
     'aff_exp': aff_exp,
-    'aff_wexp': aff_wexp,
     'aff_log': aff_log,
     'aff_square': aff_square
   }
@@ -397,9 +375,9 @@ def test_self_normalizing_grammar():
     ),
     unbounded.when(lambda depth: depth > 0): {
       unbounded() + unbounded() + op('aff_add', add_normalization): 1.0,
-      unbounded() + unbounded() + op('aff_mul', mul_normalization): 1.0,
-      positive() + unbounded() + op('aff_div', div_normalization): 1.0,
-      unbounded() + op('aff_wexp', wexp_normalization): 1.0,
+      unbounded() + unbounded() + op('aff_mul', mul_normalization): 2.0,
+      positive() + unbounded() + op('aff_div', div_normalization): 2.0,
+      unbounded() + op('aff_exp', exp_normalization): 1.0,
       positive() + op('aff_log', log_normalization): 1.0,
       unbounded() + op('aff_square', square_normalization): 1.0
     },
@@ -424,7 +402,7 @@ def test_self_normalizing_grammar():
   grid_y = np.linspace(-5, 5, num=127)
   grid = np.stack(np.meshgrid(grid_x, grid_y, indexing='ij'), axis=0)
 
-  n = 5
+  n = 6
   inputs = np_rng.normal(size=(2, 1024))
   expressions = [
     generator(py_rng, seed=expression(depth=3), inputs=grid)

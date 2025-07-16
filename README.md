@@ -154,7 +154,7 @@ In SymGen this grammar can be defined as follows:
 ```python
 import math, random
 import symgen
-from symgen.generator import Grammar, symbol, op
+from symgen.generator import GeneratorMachine, symbol, op
 
 libraries = (symgen.lib.core, symgen.lib.std)
 
@@ -177,9 +177,9 @@ rules={
 }
 
 rng = random.Random(1234567)
-generator = GeneratorMachine(lib, rules=rules)
+generator = GeneratorMachine(libraries, rules=rules)
 
-random_expression = generate.generate(rng, expr)
+random_expression = generator(rng, expr)
 ```
 
 `symbol(<symbol name>)(` creates a non-terminal symbol with the corresponding name.
