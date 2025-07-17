@@ -214,8 +214,7 @@ class Symbol(object):
       )
 
   def seed(self, **arguments) -> 'NonTerminal':
-    local_context = get_local_context(self.local, self.local_scopes, arguments)
-    return NonTerminal(self, arguments, local_context, self.checks, self.check_scopes)
+    return NonTerminal(self, arguments, self.checks, self.check_scopes)
 
 
 def symbol(name: str):
@@ -298,23 +297,22 @@ class Condition(object):
     return all(results)
 
 class NonTerminal(object):
-  __slots__ = ('definition', 'context', 'local_context', 'checks', 'check_scopes')
+  __slots__ = ('definition', 'parameters', 'checks', 'check_scopes')
 
-  def __init__(self, definition, context, local_context, checks, check_scopes):
+  def __init__(self, definition, parameters, checks, check_scopes):
     self.definition = definition
-    self.context = context
-    self.local_context = local_context
+    self.parameters = parameters
     self.checks = checks
     self.check_scopes = check_scopes
 
   def check(self, *contexts):
     return all(
-      apply_with_scope(check, scope, *contexts, self.local_context)
+      apply_with_scope(check, scope, *contexts)
       for check, scope in zip(self.checks, self.check_scopes)
     )
 
   def __repr__(self):
-    return f'{self.definition.name}({self.context, self.local_context})'
+    return f'{self.definition.name}({self.parameters})'
 
 class Invocation(object):
   __slots__ = ('definition', 'arguments', 'scopes', 'local', 'local_scopes', 'checks', 'check_scopes')
@@ -371,14 +369,14 @@ class Invocation(object):
 
     for k in self.arguments:
       f, scope = self.arguments[k], self.scopes[k]
-      context_updated[k] = apply_with_scope(f, scope, context, auto_context, local_context)
+      context_updated[k] = apply_with_scope(f, scope, local_context, context, auto_context)
 
     for k in context:
       if k not in context_updated:
         context_updated[k] = context[k]
 
     return NonTerminal(
-      self.definition, context=context_updated, local_context=local_context,
+      self.definition, parameters=context_updated,
       checks=self.checks, check_scopes=self.check_scopes
     )
 
@@ -631,7 +629,7 @@ class GeneratorMachine(object):
     active_tables = [
       (condition, table)
       for condition, table in transition_rules.items()
-      if condition(seed.context, seed.local_context, auto_context)
+      if condition(seed.parameters, auto_context)
     ]
 
     if len(active_tables) == 0:
@@ -643,7 +641,7 @@ class GeneratorMachine(object):
       return [], stack, memory
 
     likelihoods = [
-      apply_with_scope(prob, scope, seed.context, seed.local_context, auto_context)
+      apply_with_scope(prob, scope, seed.parameters, auto_context)
       for _, _, (prob, scope) in active_rules
     ]
 
@@ -664,14 +662,14 @@ class GeneratorMachine(object):
           assert term.name in self.library, f'unknown op {term.name}'
 
           op, attempt_stack, attempt_memory = self._expand_operation(
-            _rng, term, seed.context, inputs=inputs, stack=attempt_stack, memory=attempt_memory,
+            _rng, term, seed.parameters, inputs=inputs, stack=attempt_stack, memory=attempt_memory,
             attempts=attempts
           )
           result.append(op)
 
         elif isinstance(term, Invocation):
           attempt_auto_context = {'rng': _rng, 'inputs': inputs, 'stack': attempt_stack, 'memory': attempt_memory}
-          nonterminal = term(seed.context, attempt_auto_context)
+          nonterminal = term(seed.parameters, attempt_auto_context)
 
           terms, attempt_stack, attempt_memory = self._generate(
             _rng, seed=nonterminal,
@@ -684,8 +682,8 @@ class GeneratorMachine(object):
 
       attempt_auto_context = {'rng': _rng, 'inputs': inputs, 'stack': attempt_stack, 'memory': attempt_memory}
 
-      if seed.check(seed.context, attempt_auto_context):
-        if active_condition.check(seed.context, attempt_auto_context):
+      if seed.check(seed.parameters, attempt_auto_context):
+        if active_condition.check(seed.parameters, attempt_auto_context):
           return result, attempt_stack, attempt_memory
 
     raise ValueError('Maximal number of generation attempts reached.')

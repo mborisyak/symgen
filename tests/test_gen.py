@@ -12,9 +12,9 @@ def test_dsl():
   invocation = s(k=lambda i, j: i + j).where(j=lambda i: i + 1)
   result = invocation({'i': 1}, {'i': 1})
   print(result)
-  assert set(result.context.keys()) == {'i', 'k'}
-  assert result.context['i'] == 1
-  assert result.context['k'] == 3
+  assert set(result.parameters.keys()) == {'i', 'k'}
+  assert result.parameters['i'] == 1
+  assert result.parameters['k'] == 3
 
   condition = s.when(lambda k: k == 5).where(j=lambda i: 2 * i).where(k=lambda j: j + 1)
   assert isinstance(condition, Condition)
@@ -33,8 +33,8 @@ def test_dsl():
 
   s_auto = s.auto(i=lambda i, j: i + j + 1)
 
-  assert s_auto(j=lambda j: j + 1)(dict(i=1, j=10), {}).context['i'] == 12
-  assert s_auto(j=lambda j: j + 1, i=lambda i, j: i + 2 * j + 2)(dict(i=1, j=10), {}).context['i'] == 23
+  assert s_auto(j=lambda j: j + 1)(dict(i=1, j=10), {}).parameters['i'] == 12
+  assert s_auto(j=lambda j: j + 1, i=lambda i, j: i + 2 * j + 2)(dict(i=1, j=10), {}).parameters['i'] == 23
 
 def test_auto():
   import symgen
@@ -66,19 +66,19 @@ def test_local():
   lib = symgen.lib.merge(symgen.lib.core, symgen.lib.std)
   limit = 3
 
-  expr = symbol('expr').where(t1=lambda i: 2 * i + 1).auto(counter=lambda counter: counter + 1, t1=lambda i: 2 * i + 1)
+  expr = symbol('expr').where(t1=lambda i: 2 * i + 1).auto(counter=lambda counter: counter + 1, t1=lambda t1: t1)
   rules = {
     expr.when(lambda i: i < limit): expr(i=lambda t1, t2: t1 + t2).where(t2=lambda t1, i: t1 - 3 * i - 1),
-    expr.when(lambda t1: t1 >= 2 * limit + 1): op('const', lambda i, counter: counter),
+    expr.when(lambda t1: t1 >= 2 * (limit - 1) + 1): op('const', lambda counter, t1: counter + t1),
   }
 
   generator = symgen.GeneratorMachine(lib, rules=rules)
-  expression = generator(random.Random(1234), expr.seed(i=0, counter=0))
+  expression = generator(random.Random(1234), expr.seed(i=0, counter=0, t1=1))
 
   assert len(expression) == 1
   (_, arg), = expression
 
-  assert arg == limit + 2 * limit + 1
+  assert arg == limit + 2 * (limit - 1)  + 1
 
 def test_fibonacci():
   from symgen.generator import symbol
@@ -426,13 +426,14 @@ def test_self_normalizing_grammar():
     results.append(result)
 
   import matplotlib.pyplot as plt
-  fig = plt.figure(figsize=(4 * n, 3 * n))
+  fig = plt.figure(figsize=(2 * n, 2 * n))
   axes = fig.subplots(n, n, squeeze=False).ravel()
 
   for i in range(n * n):
     # axes[i].scatter(results[i][0], results[i][1])
-    c = axes[i].contourf(grid_x, grid_y, results[i][0].T)
-    plt.colorbar(c, ax=axes[i])
+    c = axes[i].contourf(grid_x, grid_y, results[i][0].T, cmap=plt.cm.cividis)
+    # plt.colorbar(c, ax=axes[i])
+    axes[i].axis('off')
 
   fig.tight_layout()
   fig.savefig('self-normalizing-grammar.png')
