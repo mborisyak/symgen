@@ -214,7 +214,8 @@ class Symbol(object):
       )
 
   def seed(self, **arguments) -> 'NonTerminal':
-    return NonTerminal(self, arguments, self.checks, self.check_scopes)
+    local_context = get_local_context(self.local, self.local_scopes, arguments)
+    return NonTerminal(self, arguments, local_context, self.checks, self.check_scopes)
 
 
 def symbol(name: str):
@@ -279,7 +280,7 @@ class Condition(object):
     scopes = [get_scope(check) for check in checks]
 
     return Condition(
-      self.name, self.condition, self.local, self.local_scopes,
+      self.definition, self.condition, self.local, self.local_scopes,
       [*self.checks, *checks], [*self.check_scopes, *scopes]
     )
 
@@ -297,17 +298,19 @@ class Condition(object):
     return all(results)
 
 class NonTerminal(object):
-  __slots__ = ('definition', 'parameters', 'checks', 'check_scopes')
+  __slots__ = ('definition', 'parameters', 'local', 'checks', 'check_scopes')
 
-  def __init__(self, definition, parameters, checks, check_scopes):
+  def __init__(self, definition: Symbol, parameters: dict[str, Any], local: dict[str, Any], checks, check_scopes):
     self.definition = definition
     self.parameters = parameters
+    self.local = local
+
     self.checks = checks
     self.check_scopes = check_scopes
 
-  def check(self, *contexts):
+  def check(self, auto_context):
     return all(
-      apply_with_scope(check, scope, *contexts)
+      apply_with_scope(check, scope, self.local, self.parameters, auto_context)
       for check, scope in zip(self.checks, self.check_scopes)
     )
 
@@ -376,7 +379,7 @@ class Invocation(object):
         context_updated[k] = context[k]
 
     return NonTerminal(
-      self.definition, parameters=context_updated,
+      self.definition, parameters=context_updated, local=local_context,
       checks=self.checks, check_scopes=self.check_scopes
     )
 
@@ -470,7 +473,7 @@ def normalize_grammar(rules: dict[Condition | Symbol, TransitionTable]) -> Norma
       table[expansion] = (prob, get_scope(prob))
 
     if isinstance(condition, Symbol):
-      condition = condition.when().where(**condition.local)
+      condition = condition.when().where(**condition.local).assure(*condition.checks)
     elif isinstance(condition, Condition):
       pass
     else:
@@ -682,7 +685,7 @@ class GeneratorMachine(object):
 
       attempt_auto_context = {'rng': _rng, 'inputs': inputs, 'stack': attempt_stack, 'memory': attempt_memory}
 
-      if seed.check(seed.parameters, attempt_auto_context):
+      if seed.check(attempt_auto_context):
         if active_condition.check(seed.parameters, attempt_auto_context):
           return result, attempt_stack, attempt_memory
 

@@ -81,15 +81,19 @@ def test_local():
   assert arg == limit + 2 * (limit - 1)  + 1
 
 def test_fibonacci():
-  from symgen.generator import symbol
-  s = symbol('s')
+  from symgen.generator import symbol, op, GeneratorMachine
+  fib = symbol('fib')
 
-  inv = s(i=lambda i, j: i + j, j=lambda i: i)
-  state = s(i=1, j=1)
+  rules = {
+    fib.when(lambda k: k > 0): op('const', lambda i: i) + fib(i=lambda i, j: i + j, j=lambda i: i, k=lambda k: k - 1),
+    fib.when(lambda k: k <= 0): None
+  }
 
-  for _ in range(10):
-    print(state)
-    state = inv(None, **state.arguments)
+  generator = GeneratorMachine(symgen.lib.core, rules=rules)
+  rng = random.Random(123)
+  expr = generator(rng, fib(i=1, j=1, k=10))
+
+  print(expr)
 
 def test_context_passing():
   from symgen.generator import symbol
@@ -243,9 +247,9 @@ def test_attempt():
   rng = random.Random(12345)
 
   for i in range(15):
-    result, stack, memory = generator.generate(rng, expr(), inputs=trace, attempts=16)
+    result = generator.generate(rng, expr(), inputs=trace, attempts=16)
 
-    assert len(result) == 3
+    assert len(result) == 3, f'{result}'
     _, const, _ = result
 
     assert const[0] == 'const'
@@ -265,6 +269,71 @@ def test_attempt():
 
   print(f'{raises} / {expected}')
   assert 0.5 * expected < raises < 2 * expected
+
+def test_attempt2():
+  import symgen
+  from symgen import symbol, op
+
+  def check(stack):
+    return np.std(stack[-1]) < 2.0
+
+  expr = symbol('expr').auto(depth=lambda depth: depth + 1)
+
+  rules = {
+    expr.assure(check): {
+      expr() + expr(force_var=False) + op('add', ): (lambda depth:  1 / (depth + 1)),
+      expr() + expr(force_var=False) + op('mul', ): (lambda depth: 1 / (depth + 1)),
+      op('variable', lambda rng, domain: rng.choice(domain)): (lambda force_var: 0.5 if force_var else 0.25),
+    },
+    expr.when(lambda force_var: not force_var): {
+      op('const', lambda rng: rng.normalvariate()): 0.25,
+    }
+  }
+
+  generator = symgen.GeneratorMachine(symgen.lib.core, symgen.lib.std, rules=rules)
+  machine = symgen.StackMachine(symgen.lib.core, symgen.lib.std)
+
+  rng = random.Random(123456)
+  np_rng = np.random.default_rng(12345678)
+  trace = np_rng.normal(size=(2, 128)).astype(np.float32)
+
+  for i in range(15):
+    expression = generator.generate(rng, expr.seed(depth=0, domain=[0, 1], force_var=True), inputs=trace, attempts=16)
+    evaluated = machine(expression, inputs=trace)
+    print(expression)
+
+    print(np.std(evaluated))
+    assert np.std(evaluated) < 2.0
+
+def test_simple_grammar():
+  import math, random
+  import symgen
+  from symgen.generator import GeneratorMachine, symbol, op
+
+  expr = symbol('expr')
+  constant = symbol('constant')
+
+  rules = {
+    expr: {
+      expr + expr + op('add'): 0.2,
+      expr + expr + op('mul'): 0.2,
+      constant: 0.6,
+    },
+    constant: {
+      op('const', 0.0): 0.2,
+      op('const', 1.0): 0.2,
+      op('const', 2.0): 0.2,
+      op('const', math.pi): 0.2,
+      op('const', math.e): 0.2,
+    }
+  }
+
+  rng = random.Random(12345678)
+  generator = GeneratorMachine(symgen.lib.core, symgen.lib.std, rules=rules)
+
+  for _ in range(10):
+    random_expression = generator(rng, expr)
+    print(random_expression)
 
 def test_self_normalizing_grammar():
   from symgen import symbol, op, GeneratorMachine, StackMachine
@@ -437,5 +506,126 @@ def test_self_normalizing_grammar():
 
   fig.tight_layout()
   fig.savefig('self-normalizing-grammar.png')
+  plt.close(fig)
+
+def test_self_rs():
+  from symgen import symbol, op, GeneratorMachine, StackMachine
+
+  expression = symbol('expression')
+  subexpression = symbol('subexpression')
+  unbounded = symbol('unbounded').auto(depth=lambda depth: depth + 1)
+  positive = symbol('positive').auto(depth=lambda depth: depth + 1)
+  constant = symbol('constant')
+  positive_constant = symbol('positive_constant')
+
+  def subexpression_check(stack):
+    mean, std = np.mean(stack[-1]), np.std(stack[-1])
+
+    return abs(mean) < 1.0 and std < 2.0
+
+  def prob(scale):
+    import math
+    return lambda depth: 2.0 * scale / depth
+
+  rules = {
+    expression: (
+        subexpression(mem=[]) + op('store', 0) +
+        subexpression(mem=[0, ]) + op('store', 1) +
+        subexpression(mem=[0, 1]) + op('store', 2) +
+        subexpression(mem=[0, 1, 2]) + op('store', 3) +
+        subexpression(mem=[0, 1, 2, 3])
+    ),
+    subexpression.when().assure(subexpression_check): unbounded,
+    unbounded: {
+      unbounded(): 1.0,
+      constant(): (lambda force_var: 0.0 if force_var else 1.0),
+      positive(): 1.0,
+
+      unbounded() + op('neg', ): prob(2.0),
+
+      unbounded() + unbounded(force_var=False) + op('add', ): prob(2.0),
+      constant() + unbounded() + op('add', ): prob(2.0),
+
+      unbounded() + unbounded(force_var=False) + op('mul', ): prob(2.0),
+      constant() + unbounded() + op('mul', ): prob(2.0),
+
+      positive() + unbounded(force_var=False) + op('div', ): prob(1.0),
+      positive(force_var=False) + unbounded() + op('div', ): prob(1.0),
+      positive() + constant() + op('div', ): prob(1.0),
+
+
+      unbounded() + op('exp', ): prob(2.0),
+      positive() + op('log', ): prob(1.0),
+      unbounded() + op('square', ): prob(1.0),
+
+      op('variable', lambda rng, inputs: rng.randint(0, inputs.shape[0] - 1)): 1.0,
+      op('load', lambda rng, mem: rng.randint(0, len(mem) - 1)): (lambda mem: len(mem))
+    },
+    positive: {
+      positive(): 1.0,
+      positive_constant(): (lambda force_var: 0.0 if force_var else 1.0),
+      positive_constant() + positive() + op('add'): 1.0,
+      unbounded() + op('exp', ): 1.0,
+      unbounded() + op('square', ): 1.0,
+      positive() + op('sqrt', ): 1.0,
+    },
+
+    constant: op('const', lambda rng: rng.normalvariate()),
+    positive_constant: op('const', lambda rng: rng.expovariate(1.0)),
+  }
+
+  libs = (symgen.lib.core, symgen.lib.std)
+  machine = StackMachine(*libs)
+  generator = GeneratorMachine(*libs, rules=rules)
+
+  py_rng = random.Random(12345678)
+  np_rng = np.random.default_rng(12345678)
+
+  grid_x = np.linspace(-5, 5, num=129)
+  grid_y = np.linspace(-5, 5, num=127)
+  grid = np.stack(np.meshgrid(grid_x, grid_y, indexing='ij'), axis=0)
+
+  n = 6
+  inputs = np_rng.normal(size=(2, 1024))
+  expressions = [
+    generator(py_rng, seed=expression(depth=1, force_var=True), inputs=grid, attempts=1024)
+    for _ in range(n * n)
+  ]
+
+  complexity = [len(expr) for expr in expressions]
+
+  print(f'Complexity: {np.mean(complexity):.1f} +- {np.std(complexity):.1f}')
+
+  for expr in expressions:
+    print(expr)
+
+  results = []
+  for expr in expressions:
+    # assert len(expr) <= 2 * (2 ** 6 - 1)
+    result = machine(expr, inputs=grid)
+
+    # assert result.shape == (2, 1024)
+
+    if not np.all(np.isfinite(result)):
+      trace = machine.trace(expr, inputs=grid)
+
+      for tr, term in zip(trace, expr):
+        if not np.all(np.isfinite(tr)):
+          print(term)
+
+    results.append(result)
+
+  import matplotlib.pyplot as plt
+  fig = plt.figure(figsize=(2 * n, 2 * n))
+  axes = fig.subplots(n, n, squeeze=False).ravel()
+
+  for i in range(n * n):
+    # axes[i].scatter(results[i][0], results[i][1])
+    c = axes[i].contourf(grid_x, grid_y, results[i][0].T, cmap=plt.cm.cividis)
+    # plt.colorbar(c, ax=axes[i])
+    axes[i].axis('off')
+
+  fig.tight_layout()
+  fig.savefig('rejection-sampling.png')
   plt.close(fig)
 

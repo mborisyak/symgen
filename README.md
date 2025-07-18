@@ -1,7 +1,9 @@
 # SymGen
 
-SymGen is an interpreter and generator of symbolic expressions. It uses mixed stack-memory machines for evaluation
+SymGen is an interpreter and a generator of symbolic expressions. It uses mixed stack-memory machines for evaluation
 and stochastic context-free grammars for generating symbolic expressions.
+
+![](https://raw.githubusercontent.com/mborisyak/symgen/83aa06159ab8cb5c23e51b2bfe49ac170fa73a07/imgs/normalized-grammar.png)
 
 ## Why?
 
@@ -19,11 +21,12 @@ import symgen
 machine = symgen.StackMachine(symgen.lib.core, symgen.lib.std)
 ```
 All operators, except for the core ones, have unique name (typically 3-4 letters), like `add`, `mul`.
-Besides the names, *the core operators* have special syntax:
+Besides the names, *the core operators* have a special syntax:
 - `<float | integer>`, e.g., `1.0` --- the `const` operator, pushes the constant into the stack;
 - `(<integer>)`, e.g., `(0)` --- the `variable` operator, pushes the expression's input variable into the stack
   (indexing starts with zero);
-- `[<integer>]`, e.g., `[1]` --- the `load` operator, pushes the content of the memory cell into the stack;
+- `[<integer>]`, e.g., `[1]` --- the `load` operator, pushes the content of the memory cell into the stack,
+  the memory remains unchanged;
 - `{<integer>}`, e.g., `{3}` --- the `store` operator, stores the top value from the stack into the memory cell,
 the value is removed from the stack.
 
@@ -42,10 +45,11 @@ Below are some examples of expressions:
 0.3989422804014327 2 (0) (0) mul div neg exp mul {0} [0] [0] log mul
 ```
 
-Assembly langauge can be evaluated via `machine.evaluate(expression, *inputs)` or
-`machine.__call__(expression, inputs=None, *, out=None)`.
-The latter method expected inputs as a numpy array with the shape `(number of the input variables, *batch dimensions)`
+Assembly langauge can be evaluated via `machine.__call__(expression, inputs=None, *, out=None)`
+The method expected inputs as a numpy array with the shape `(number of the input variables, *batch dimensions)`
 and can write to a buffer `out` with the similar dimensions.
+
+`machine.evaluate(expression, *inputs)` is a convenience wrapper around the `__call__` method.
 
 ```python
 machine.evaluate('1.0 2.0 add') # 3.0
@@ -101,18 +105,18 @@ my_library = dict(
 )
 ```
 
-`symgen` analyses the signature of the function and treats all **non-keyword-only** arguments as operator inputs.
+`symgen` analyses the signature of the function and treats all **non keyword-only** arguments as operator inputs.
 The operator can also receive the following additional arguments (if they are declared as keyword-only):
 - `argument` --- the argument of the operator, for example, when executing an operator `('const', 1.0)`
 `1.0` is passed as `argument`. Multiple values can be passed as a tuple, e.g., `('linear', (2.0, 1.0))`;
 - `out` --- output buffer, by analogy with the most numpy functions;
-- `inputs` --- inputs variables stored as a single numpy array with shape `(dim, *batch dimensions)`;
-- `memory` --- a numpy buffer that holds current state of the memory.
+- `inputs` --- inputs variables stored as a single numpy array of shape `(dim, *batch dimensions)`;
+- `memory` --- a numpy buffer that holds the current state of the memory.
 
-Normally, only the first two arguments are needed for custom operators, the latter two are used by the core operators.
+Normally, only the first two arguments (`argument` and `out`) are needed for custom operators,
+the latter two are used by the core operators.
 
-*Note:* to define a keyword-only arguments one can use the
-[star-syntax](https://docs.python.org/3/reference/compound_stmts.html#function),
+*Note:* to define a keyword-only arguments one can use the [star-syntax](https://docs.python.org/3/reference/compound_stmts.html#function),
 for example, `lambda positional, *, keyword_only:`
 
 *Note:* it is preferable to use the `out` argument and directly write the results into the buffer to avoid needless
@@ -128,13 +132,15 @@ inc = lambda x, *, out: np.add(x, 1, out=out)
 If an operator uses `out` argument its output is simply ignored.
 Most numpy functions support directly writing the result into a buffer (also via an optional `out` argument).
 
+If a operator does not push anything into the stack (e.g., memory operations), it should return `None`.
+
 ## Generating random expressions
 
 ### Grammar
 
 SymGen uses (enhanced) context-free grammar for generating random expressions.
 A grammar extends instruction set (terminal symbols) with non-terminal symbols: each non-terminal symbol
-is expanded according to the probabilistic transition table until no non-terminal symbols remains.
+is expanded according to the probabilistic transition table until all non-terminal symbols are processed.
 Transition are picked randomly and are independent of the surrounding expressions (i.e., context-free).
 For example, the following grammar generates random expressions with `add` and `mul` operators:
 ```
@@ -156,12 +162,10 @@ import math, random
 import symgen
 from symgen.generator import GeneratorMachine, symbol, op
 
-libraries = (symgen.lib.core, symgen.lib.std)
-
 expr = symbol('expr')
 constant = symbol('constant')
 
-rules={
+rules = {
   expr: {
     expr + expr + op('add'): 0.2,
     expr + expr + op('mul'): 0.2,
@@ -176,15 +180,18 @@ rules={
   }
 }
 
-rng = random.Random(1234567)
-generator = GeneratorMachine(libraries, rules=rules)
+rng = random.Random(12345678)
+generator = GeneratorMachine(symgen.lib.core, symgen.lib.std, rules=rules)
 
-random_expression = generator(rng, expr)
+for _ in range(10):
+  random_expression = generator(rng, expr)
+  print(random_expression)
 ```
 
-`symbol(<symbol name>)(` creates a non-terminal symbol with the corresponding name.
-`rules` is a dictionary that maps `Condition` into a transition table: a dictionary mapping `Expansion`s into probabilities
-(probability values are automatically normalized to 1).
+`symbol(<symbol name>)` creates a non-terminal symbol with the corresponding name.
+`rules` define transition (expansion) rules, it maps `Symbol` into a transition table.
+Transition table is a dictionary mapping `Expansion`s (a sequence of symbols) into likelihoods
+(likelihoods are automatically normalized to 1).
 
 If the transition table contains only one expansion, one can use the simplified syntax:
 ```python
@@ -210,119 +217,132 @@ has a non-zero chance of "running away" during generation.
 It is highly advisable to write a priori finite grammars. The following section introduces the extension of the free grammar
 that helps us, among other things, to constrain the generation process.
 
-### Context and conditions
+## Parameterized Context-Free Grammar
 
-During the expansion process, non-terminal symbols can carry a context represented by a dictionary.
-To set the context, one can simply call the symbol and provide the context via keyword arguments:
+While context-free grammars (CFG) are a powerful tool, a lot of simple use-cases,
+like restricting the depth of the expression or steering probability, require additional functionality.
+
+Parameterized context-free grammars (PCFG) offer a simple and intuitive, yet powerful extension of CFG.
+A PCFG equips non-terminal symbols with arbitrary arguments, a *context*. In `symgen` these arguments
+are represented by a dictionary that maps the names of the variables into the values.
+To distinguish between a symbol and a symbol with context we call the latter *non-terminal*.
+
+To make a new non-terminal from a symbol, one can call `Symbol.seed` method, practically, one needs a non-terminal
+only when specifying the initial, "seed", non-terminal.
+
+### Conditions
+
+A CFG operates with transition tables `non-terminal -> possible expansions`. With the introduction of the context,
+non-terminals are replaced with *conditions*, a symbol equipped with a boolean function defined on the context.
+A transition is active if the condition matches the symbol of the non-terminal and
+the function is true on its context.
+A condition can be created by calling `Symbol.when` method and passing the boolean function.
+
 ```python
-from symgen import Grammar, symbol
-
 expr = symbol('expr')
-invocation = expr(i=1, j=2)
+rules = {
+  expr.when(lambda i: i < limit): ...,
+  expr.when(lambda i: i >= limit): ...,
+}
 ```
-By analogy with functions, a symbol with a context is called invocation.
 
-The generator can be instructed to modify the context by supplying the update functions.
-For example, the following generator:
+The variable names in the boolean function must match the variable names of the context.
+`symgen` reads the signature of the boolean function and automatically passes all necessary arguments.
+
+*Note:* the function can be defined on a subset of the context variables, the other variables are
+passed into the *variable keyword argument* (defined by double star, e.g., `lambda **kwargs: ...`) if the function
+has one, or simply filtered out otherwise.
+
+**Important note:** when multiple conditions are satisfied, the active transition tables are merged.
+The likelihoods are normalized by the sum of likelihoods in all active tables. The simplified syntax
+`condition: expansion` is assigned the likelihood of 1.
+
+*Note:* a `Symbol` alone is equivalent to the trivial condition `expr.when(lambda: True)`.
+
+### Invocations
+
+In PCFG, expansions are a sequence of *invocations*, symbols with context-update functions.
+A context-update function creates a new context from that of the currently expanding non-terminal.
+Invocation can be defined by calling `Symbol.__call__` method:
+
 ```python
+expr = symbol('expr')
 rules = {
-  expr : expr(i=lambda i, j: i + j, j=lambda i: i)
-}
-
-generator = GeneratorMachine(lib, rules=rules)
-generator(rng, expr(i=1, j=1))
-```
-computes the Fibonacci sequence (and also never finishes, see *conditional transitions* below).
-
-The context variables are matched by name, thus, the context update functions must have arguments with
-the same name as variables in the context.
-
-If a variables does not have an update function, it is passed without modification.
-
-Context is (supposed to be) *immutable*, each invocation creates a new modified context
-and is unaffected by the surrounding expansions. In the following example:
-```
-rules = {
-  expr : subexpr(i=lambda i: i + 1) + subexpr(i=lambda i: i + 2)
+  expr.when(lambda i: i < limit): {
+    expr(i=lambda i: i - 1): 1.0,
+    expr(i=lambda i: i - 2): 1.0,
+    expr(i=lambda i: i - 1) + exp(i=lambda i: i - 1) + op('add'): 1.0,
+    expr(i=lambda i: i - 1) + exp(i=lambda i: i - 1) + op('mul'): 1.0,
+  }
+  expr.when(lambda i: i >= limit): op('variable', ...),
 }
 ```
-the update function in each `subexpr` is applied to the context of `expr` and doesn't influence another `subexpr`.
-The exceptions to this rule include special context variables that are managed by the generator (see below). 
+The grammar above switches between transition tables depending on the depth of the expression
+(tracked via variable `i`), forcing the generator to produce a concrete operation, `op('variable', ...)`, when
+the depth limit is reached. Additionally, `expr` can skip 1 or 2 depth levels without producing any additional
+expressions (the first two rules).
 
-*Note:* `symgen` does not enforce or track immutability, it is possible to modify the original context if the value
-is, e.g., a list:
-```
-def update(a_list):
-  a_list.append(len(a_list))
-  return a_list
+Context-update functions are defined as dictionaries `variable name: variable-update function` via
+`**kwargs` of `Symbol.__call__`. Naturally, variable-update function can use any subset of the context variables.
 
-rules = {
-  expr : expr(a_list=update) + expr(a_list=update)
-}
-```
-The expansion of the first term expands the original list, thus, the second term will receive a modified value.
-It is advisable to be careful with mutable collections.
+**Note:** by convention, variables that don't have an update function are simply copied.
 
-### Conditional operations
+**Important note:** variable-update functions are independent, in particular, they always use the original context
+variables. For example, in the invocation `expr(i=lambda i: i + 1, j=lambda i: i - 1)`, the update function for `j`
+uses the original value of `i` not the updated one (`i + 1`).
 
-The context can be used to generate operations:
+**Auto-updates:** `Symbol` provides a convenience method `auto` that accepts context-update functions.
+The auto-update functions are simply copied into all invocations produced by the symbol unless overridden:
 ```python
+symbol_w_auto_updates = symbol('symbol').auto(depth=lambda depth: depth + 1)
+another_symbol = symbol('another')
+
 rules = {
-  expr: op('variable', 0) + op('const', lambda i: float(i)) + op('add')
+  ...: symbol_w_auto_updates() + symbol_w_auto_updates(depth=lambda depth + 2) + another_symbol()
 }
 ```
-produces an expression that increments the first input variable by what the context variable `i` holds.
 
-### Conditional transitions
+**Caveat:** when a non-terminal is expanded into a non-terminal of another symbol, the context is copied,
+but the auto-update functions are not. This might lead to a confusing behavior, in the example above, `another_symbol`
+inherits the `depth` variable but does not update it.
 
-Additionally, context can be used in *conditional transitions*:
+**Another caveat:** `auto` returns a copy of the symbol with the auto updates, but doesn't modify the original symbol.
+
+### Parametrized operations
+
+Operation-generating terms (`op`) can use the context to compute operations' arguments. For example,
+the following grammar generates expressions that push the first `k` elements of the Fibonacci sequence into the stack: 
 ```python
-N = ...
+from symgen.generator import symbol, op, GeneratorMachine
+fib = symbol('fib').auto(k=lambda k: k - 1)
 
 rules = {
-  expr.when(lambda depth: depth < N): {
-    expr(depth=lambda depth: depth + 1) + expr(depth=lambda depth: depth + 1) + op('add'): 1.0,
-    expr(depth=lambda depth: depth + 1) + expr(depth=lambda depth: depth + 1) + op('mul'): 1.0,
-    expr(depth=lambda depth: depth + 1): 1.0
-  },
-  expr.when(lambda depth: depth >= N): op('variable', 0)
+  fib.when(lambda k: k > 0): op('const', lambda i: i) + fib(i=lambda i, j: i + j, j=lambda i: i),
+  fib.when(lambda k: k <= 0): None
 }
+
+generator = GeneratorMachine(symgen.lib.core, rules=rules)
+rng = random.Random(123)
+expr = generator(rng, fib(i=1, j=1, k=10))
+
+print(expr)
 ```
-that switches transition tables on/off depending on the context.
-
-The example above demonstrated a useful pattern of an a priori finite grammar.
-
-*Note:* if multiple conditions are satisfied, the active tables are **merged**. Transition likelihoods are
-automatically normalized. The transition produced by a simplified syntax `expr: expansion`
-is assigned the likelihood of `1.0`.
 
 ### Conditional likelihoods
 
-Likelihoods cna be made conditional by replacing concrete values with functions that accept context variables and
-output a concrete value:
+Likelihoods cna be made conditional by replacing the concrete values with functions that accept context variables:
 ```python
-expr: {
-  expr(depth=lambda depth: depth + 1) + expr(depth=lambda depth: depth + 1) + op('add'): lambda depth: 1 / (depth + 1),
-  op('variable', 0): 1.0
-}
-```
-As likelihoods are converted into probabilities by normalizing their sum to 1, the probability of the first transition
-decreases with the depth of expression ensuring that the expansion almost surely stops.
-
-### Auto-updates
-
-*Auto-updates* are automatically appended to every invocation, unless explicitly overridden.
-`Symbol.auto` method provides a way to declare auto-updates.
-It is especially useful for tracking variables like expression depth:
-
-```python
-expr = symbol('expr').auto(depth=lambda depth: depth + 1)
+expr = symbol('expr').auto(depth=lambda depth + 1)
 
 rules = {
-  expr.when(lambda depth: depth < limit): expr + expr + op('add'),
-  expr.when(lambda depth: depth >= limit): op('variable', 0),
+  expr: {
+    expr() + expr() + op('add'): lambda depth: 1 / (depth + 1),
+    op('variable', 0): 1.0
+  }
 }
 ```
+As likelihoods are converted into probabilities by normalizing their sum to 1,
+the probability of the first transition in the example above decreases with the depth of the expression.
 
 ### Local context
 
@@ -332,7 +352,8 @@ the updates share heavy computations. Local context allows to introduce temporar
 - it is computed before executing the usual update functions and the local variables are available for the context update functions;
 - unlike normal updates, it is computed sequentially --- an update function (or rather definition) can use variables computed before it.
 
-Local context can be declared via `where` method. Declaring local context of a `Symbol` simply passes it to its invocations.
+Local context can be declared via `where` method. Declaring local context of a `Symbol` simply passes it
+to its invocations (but not to conditions, likelihoods and operations).
 
 ```python
 expr = symbol('expr').where(t1=lambda i: 2 * i + 1)
@@ -343,10 +364,17 @@ rules = {
 ```
 In the example above, the local variable `t1` is available for computing `t2`, and both, `t1` and `t2`, are used
 for computing the update of `i`.
-Note that the local context declared at the symbol level is also available for conditions and operations.
-The latter can also declare their own local variables.
 
-Local context can be especially useful to avoid recomputing statistics on large arrays (see *tracing* below).
+**Priority:** local context takes priority over the ordinary context, i.e., if a variable declared in both,
+the value from the local context is taken.
+
+**Note:** if it is desirable to use variables from the local context in conditions, likelihoods or operations,
+one could "promote" the local variable to the global level:
+```python
+expr = symbol('expr').where(temp=lambda ...: ...).auto(temp=lambda temp: temp)
+```
+In the example above, a "global" variable `tmp` is auto-updated to match the local variable with the same name.
+As local variables take priority, other computations are unaffected by the `auto` declaration.
 
 ### Random generator
 
@@ -362,10 +390,10 @@ Moreover, even within the same expansion, invocations receive generators with di
 
 ### Tracing
 
-A naive approach at generating expressions would quickly result in pathological cases:
+A naive approach at generating expressions often results in pathological cases:
 NaNs, infinities or simply very small or very large numbers.
 One could filter badly behaved expressions post factum, however,
-the chances to produce a such an expression sharply raise with the increase in complexity.
+the chances of producing a such an expression sharply raise with the increase in complexity.
 
 Moreover, it's quite difficult to construct a set of rules that produce complex and, at the same time, stable
 expressions.
@@ -373,7 +401,7 @@ expressions.
 `symgen.GeneratorMachine` can evaluate (trace) results of the expression as it is being generated.
 To enable tracing, one should supply `inputs` argument to the `GeneratorMachine.__call__` method.
 The `inputs` array should have the same shape as in `StackMachine.__call__`.
-The partial results are available via the following keywords:
+The partial results are available via the following context-like variables:
 - `inputs` holds the original array;
 - `stack` --- a list with the current state of the stack;
 - `memory` --- a dictionary (`int -> np.ndarray`) with the current state of memory.
@@ -386,22 +414,54 @@ rules = {
 }
 ```
 `subexpr2` would receive results of evaluating `subexpr1`.
-Conditions and operations can also access the same variables.
-
-*Important note:* auto-updates operate with the `stack` at the moment of expansion (as one would expect), however,
-the local context defined at the symbol level is evaluated **before** the expansion. For example:
-
-```python
-expr = symbol('expr').
-rules = {
-  expr: subexpr1 + subexpr2,
-  ...
-}
-```
+Conditions, operations and likelihoods can also access the same variables.
 
 
 ### Rejection sampling
 
-`symgen` allows using rejection sampling on the subexpression level via `check`
+`symgen` allows using rejection sampling on the subexpression level via post-check declared by `assure` methods
+of symbols, invocations, conditions and operations. Checks are similar to conditions except:
+- they are evaluated after the expansion is complete;
+- notably, they receive up-to-date `stack` and `memory`;
+- however, the context is the same as at the start of the expansion,
+- consequently, if context variables depend on `stack` or `memory` they might be outdated.
+
+When a check fails the whole expansion is attempted again until the limit of attempts is reached
+(`attempts` argument of `GeneratoreMachine.__call__`).
+
+Symbol's checks are simply passed to the invocations (but not to conditions).
+
+Below is a minimal example that demonstrates rejection sampling.
+
+```python
+import symgen
+from symgen import symbol, op
+
+def check(stack):
+  return np.std(stack[-1]) < 2.0
+
+expr = symbol('expr').auto(depth=lambda depth: depth + 1)
+
+rules = {
+  expr.assure(check): {
+    expr() + expr(force_var=False) + op('add', ): (lambda depth:  1 / (depth + 1)),
+    expr() + expr(force_var=False) + op('mul', ): (lambda depth: 1 / (depth + 1)),
+    op('variable', lambda rng, domain: rng.choice(domain)): (lambda force_var: 0.5 if force_var else 0.25),
+  },
+  expr.when(lambda force_var: not force_var): {
+    op('const', lambda rng: rng.normalvariate()): 0.25,
+  }
+}
+
+generator = symgen.GeneratorMachine(symgen.lib.core, symgen.lib.std, rules=rules)
+machine = symgen.StackMachine(symgen.lib.core, symgen.lib.std)
+
+rng = random.Random(123456)
+np_rng = np.random.default_rng(12345678)
+trace = np_rng.normal(size=(2, 128)).astype(np.float32)
+
+expression = generator.generate(rng, expr.seed(depth=0, domain=[0, 1], force_var=True), inputs=trace, attempts=16)
+evaluated = machine(expression, inputs=trace)
+```
 
 

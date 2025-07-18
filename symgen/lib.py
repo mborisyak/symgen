@@ -42,6 +42,7 @@ std = dict(
   log=lambda x, *, out=None: np.log(x, out=out),
   exp=lambda x, *, out=None: np.exp(x, out=out),
   sqrt=lambda x, *, out=None: np.sqrt(x, out=out),
+  square=lambda x, *, out=None: np.square(x, out=out),
 )
 
 stable = dict(
