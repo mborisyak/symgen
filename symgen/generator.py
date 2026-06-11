@@ -1,11 +1,13 @@
-from typing import TypeAlias, Callable, Any, Sequence
+from typing import TypeAlias, Callable, Any, Sequence, Iterable
 import inspect
 
-import random
 import numpy as np
+import jax
+import jax.numpy as jnp
 
-from .operation import Operation, inspect_op
+from .operation import Operation, inspect_op, bind
 from .lib import merge
+from .dag import Topology, TopologyGenerator, Trivial
 
 __all__ = [
   'symbol', 'op',
@@ -113,7 +115,10 @@ class Op(object):
       local_context = get_local_context(self.local, self.local_scopes, *contexts)
 
       argument = apply_with_scope(self.argument, self.scope, *contexts, local_context)
-      return self.name, argument
+      if isinstance(argument, (tuple, list)):
+        return (self.name, *argument)
+      else:
+        return (self.name, argument)
 
   def where(self, **local: Callable[..., Any]):
     merged, merged_scopes = merge_local_definitions(self.local, self.local_scopes, local)
@@ -272,8 +277,6 @@ class Condition(object):
       return True
     else:
       local_context = get_local_context(self.local, self.local_scopes, *contexts)
-      if contexts[0].get('i') == 3:
-        pass
       return apply_with_scope(self.condition, self.scope, local_context, *contexts)
 
   def assure(self, *checks):
@@ -495,13 +498,13 @@ def normalize_grammar(rules: dict[Condition | Symbol, TransitionTable]) -> Norma
 
   return transitions
 
-def sample(rng: random.Random, likelihoods):
+def sample(rng: np.random.Generator, likelihoods):
   norm = sum(likelihoods)
   u = rng.uniform(0, norm)
   c = 0.0
   for i, l in enumerate(likelihoods):
     c += l
-    if c >= u:
+    if c > u:
       return i
 
   return len(likelihoods) - 1
@@ -509,96 +512,174 @@ def sample(rng: random.Random, likelihoods):
 class CheckFailed(Exception):
   pass
 
+def reachable(roots: Iterable[int], deps: Callable[[int], Iterable[int]]) -> set[int]:
+  """Cells reachable from `roots` following `deps`."""
+  seen: set[int] = set()
+  stack = list(roots)
+  while stack:
+    cell = stack.pop()
+    if cell in seen:
+      continue
+    seen.add(cell)
+    stack.extend(deps(cell))
+  return seen
+
+def lower(graph: Topology, expressions: dict[int, list[tuple]], n_out: int) -> list[tuple]:
+  """Flatten per-node local programs into one stack-machine program, compacting memory cells."""
+  n_in = next((i for i, node in enumerate(graph) if node is not None), len(graph))
+
+  remap = {i: i for i in range(n_in)}
+  for new_cell, cell in enumerate(sorted(expressions), start=n_in):
+    remap[cell] = new_cell
+
+  program: list[tuple] = []
+
+  for cell in sorted(expressions):
+    links, _ = graph[cell]
+    for op, *args in expressions[cell]:
+      if op == 'load':
+        program.append(('load', remap[int(links[args[0]])]))
+      else:
+        program.append((op, *args))
+    program.append(('store', remap[cell]))
+
+  for cell in range(len(graph) - n_out, len(graph)):
+    program.append(('load', remap[cell]))
+
+  return program
+
+def restore_topology(program: list[tuple]) -> Topology:
+  """Reconstruct the topology from a lowered program (inverse of `lower`, best-effort)."""
+  nodes: dict[int, tuple[int, ...]] = {}
+  body: list[int] = []
+  max_cell = -1
+
+  for op, *args in program:
+    if op == 'load':
+      cell = int(args[0])
+      body.append(cell)
+      max_cell = max(max_cell, cell)
+    elif op == 'store':
+      cell = int(args[0])
+      max_cell = max(max_cell, cell)
+      nodes[cell] = tuple(dict.fromkeys(body))            # distinct links, first-appearance order
+      body = []
+
+  return [
+    (nodes[cell], {}) if cell in nodes else None
+    for cell in range(max_cell + 1)
+  ]
+
 class GeneratorMachine(object):
   def __init__(
     self, *libraries: dict[str, Operation],
     rules: dict[Condition | Symbol, TransitionTable],
+    topology: 'TopologyGenerator' = Trivial(),
   ):
-    self.library = merge(*libraries)
+    library = merge(*libraries)
     self.properties = {
       name: inspect_op(operation)
-      for name, operation in self.library.items()
+      for name, operation in library.items()
     }
-    self.grammar = normalize_grammar(rules)
     self.op_scopes = {
       k: get_scope(op)
-      for k, op in self.library.items()
+      for k, op in library.items()
     }
+    self.library = {
+      name: (op if 'memory' in self.properties[name][1] else jax.jit(op))
+      for name, op in library.items()
+    }
+    self.grammar = normalize_grammar(rules)
+    self.topology = topology
 
   def __call__(
-    self, rng: random.Random, seed: Symbol | Invocation | NonTerminal, *,
-    inputs: np.ndarray[np.float32] | None=None, attempts: int | None = None
+    self, rng: np.random.Generator, seed: Symbol | Invocation | NonTerminal, *,
+    inputs, n_out: int = 1, attempts: int | None = None
   ):
-    return self.generate(rng, seed, inputs=inputs, attempts=attempts)
+    return self.generate(rng, seed, inputs=inputs, n_out=n_out, attempts=attempts)
 
   def generate(
-    self, rng: random.Random, seed: Symbol | Invocation | NonTerminal, *,
-    inputs: np.ndarray[np.float32] | None = None,
-    attempts: int | None = None
+    self, rng: np.random.Generator, seed: Symbol | Invocation | NonTerminal, *,
+    inputs, n_out: int = 1, attempts: int | None = None
   ):
-    if inputs is None:
-      stack = None
-      memory = None
-    else:
-      stack = []
-      memory = {}
+    """Sample a topology, generate each node's expression into shared memory, and lower to a program."""
+    inputs = jnp.asarray(inputs)
+    n_in = inputs.shape[0]
+
+    graph = self.topology(rng, n_in, n_out)
+    outputs = list(range(len(graph) - n_out, len(graph)))
+
+    links_of = lambda cell: () if graph[cell] is None else graph[cell][0]
+    needed = reachable(outputs, links_of)
+
+    memory = [None] * len(graph)                          # between-node memory (list of jax arrays)
+    for i in range(n_in):
+      memory[i] = inputs[i]                               # seed input cells
+
+    expressions: dict[int, list[tuple]] = {}
+    actual_deps: dict[int, set[int]] = {}
+    for cell, node in enumerate(graph):
+      if node is None or cell not in needed:
+        continue                                          # input cell, or a node no output reaches
+
+      links, node_context = node
+      local_memory = [memory[g] for g in links]           # copy-in: general memory, local layout
+
+      expression, value = self._generate_node(
+        rng, seed, memory=local_memory, node_context=node_context, attempts=attempts
+      )
+      memory[cell] = value                                # copy-out: commit
+      expressions[cell] = expression
+      actual_deps[cell] = {links[args[0]] for op, *args in expression if op == 'load'}
+
+    live = reachable(outputs, lambda cell: actual_deps.get(cell, ()))
+    program = lower(graph, {cell: expressions[cell] for cell in expressions if cell in live}, n_out)
+
+    return program
+
+  def _generate_node(
+    self, rng: np.random.Generator, seed: Symbol | Invocation | NonTerminal, *,
+    memory: list, node_context: dict, attempts: int | None = None
+  ):
+    auto_context = {'rng': rng, 'stack': [], 'memory': memory, **node_context}
 
     if isinstance(seed, Symbol):
-      seed = seed()({}, {'rng': rng, 'stack': stack, 'memory': memory, 'inputs': inputs})
-
+      nonterminal = seed()({}, auto_context)
     elif isinstance(seed, Invocation):
-      seed = seed({}, {'rng': rng, 'stack': stack, 'memory': memory, 'inputs': inputs})
+      nonterminal = seed({}, auto_context)
+    else:
+      nonterminal = seed
 
-    expression, _, _ = self._generate(
-      rng, seed,
-      inputs=inputs, stack=stack, memory=memory,
-      attempts=attempts
+    expression, stack, _ = self._generate(
+      rng, nonterminal, stack=[], memory=memory, node_context=node_context, attempts=attempts
     )
 
-    return expression
+    assert len(stack) == 1, \
+      f'a node expression must net exactly one value, got {len(stack)} for {seed}'
+
+    return expression, stack[-1]
 
   def _expand_operation(
-    self, rng: random.Random, term: Op, context: dict[str, Any],
-    inputs: np.ndarray[np.float32] | None=None,
-    stack: list[np.ndarray[np.float32]] | None=None,
-    memory: dict[int, np.ndarray[np.float32]] | None = None,
-    attempts: int | None=None
+    self, rng: np.random.Generator, term: Op, context: dict[str, Any], *,
+    stack: list, memory: list, node_context: dict, attempts: int | None = None
   ):
     assert term.name in self.library, f'unknown op {term.name}'
 
     attempts = 1 if attempts is None else attempts
 
     for _ in range(attempts):
-      attempt_stack = None if stack is None else stack.copy()
-      attempt_memory = None if memory is None else memory.copy()
-      attempt_autocontext = {'rng': rng, 'stack': attempt_stack, 'memory': attempt_memory, 'inputs': inputs}
+      attempt_stack = stack.copy()
+      attempt_memory = memory.copy()
+      attempt_autocontext = {'rng': rng, 'stack': attempt_stack, 'memory': attempt_memory, **node_context}
 
       operation, *operation_args = term(context, attempt_autocontext)
 
-      if inputs is not None:
-        arity, scope = self.properties[term.name]
-        args = [attempt_stack.pop() for _ in range(arity)]
+      arity, arguments = self.properties[term.name]
+      operands = [attempt_stack.pop() for _ in range(arity)]
 
-        kwargs = {}
-        if 'inputs' in scope:
-          kwargs['inputs'] = inputs
-        if 'memory' in scope:
-          kwargs['memory'] = attempt_memory
-        if 'argument' in scope:
-          kwargs['argument'], = operation_args
-
-        if 'out' in scope:
-          _, *batch = inputs.shape
-          out = np.ndarray(shape=batch, dtype=inputs.dtype)
-          self.library[term.name](*args, **kwargs, out=out)
-          attempt_stack.append(out)
-        else:
-          out = self.library[term.name](*args, **kwargs)
-          if out is not None:
-            attempt_stack.append(out)
-
-        # attempt_autocontext['stack'] = attempt_stack
-        # attempt_autocontext['memory'] = attempt_memory
+      out = self.library[term.name](*operands, **bind(arguments, operation_args, attempt_memory))
+      if out is not None:
+        attempt_stack.append(out)
 
       if term.check(context, attempt_autocontext):
         return (operation, *operation_args), attempt_stack, attempt_memory
@@ -606,27 +687,15 @@ class GeneratorMachine(object):
     raise ValueError('Maximal number of attempts reached.')
 
   def _generate(
-    self, rng: random.Random, seed: NonTerminal, *,
-    inputs: np.ndarray[np.float32] | None=None,
-    stack: list[np.ndarray[np.float32]] | None=None,
-    memory: dict[int, np.ndarray[np.float32]] | None = None,
-    attempts: int | None=None
+    self, rng: np.random.Generator, seed: NonTerminal, *,
+    stack: list, memory: list, node_context: dict, attempts: int | None = None
   ):
-    _rng = random.Random(rng.getrandbits(16))
+    _rng = np.random.default_rng(rng.integers(0, np.iinfo(int).max, size=(4, )))
 
-    if inputs is not None:
-      stack = list() if stack is None else [x for x in stack]
-      memory = dict() if memory is None else {k: v for k, v in memory.items()}
-    else:
-      stack = None
-      memory = None
+    stack = [x for x in stack]
+    memory = memory.copy()
 
-    auto_context = {
-      'rng': _rng,
-      'inputs': inputs,
-      'stack': stack,
-      'memory': memory,
-    }
+    auto_context = {'rng': _rng, 'stack': stack, 'memory': memory, **node_context}
 
     transition_rules = self.grammar[seed.definition.name]
     active_tables = [
@@ -657,33 +726,35 @@ class GeneratorMachine(object):
       index = sample(_rng, likelihoods)
       active_condition, expansion, _ = active_rules[index]
 
-      attempt_stack = None if stack is None else stack.copy()
-      attempt_memory = None if memory is None else memory.copy()
+      attempt_stack = stack.copy()
+      attempt_memory = memory.copy()
 
       for term in expansion:
         if isinstance(term, Op):
           assert term.name in self.library, f'unknown op {term.name}'
 
           op, attempt_stack, attempt_memory = self._expand_operation(
-            _rng, term, seed.parameters, inputs=inputs, stack=attempt_stack, memory=attempt_memory,
+            _rng, term, seed.parameters,
+            stack=attempt_stack, memory=attempt_memory, node_context=node_context,
             attempts=attempts
           )
           result.append(op)
 
         elif isinstance(term, Invocation):
-          attempt_auto_context = {'rng': _rng, 'inputs': inputs, 'stack': attempt_stack, 'memory': attempt_memory}
+          attempt_auto_context = {'rng': _rng, 'stack': attempt_stack, 'memory': attempt_memory, **node_context}
           nonterminal = term(seed.parameters, attempt_auto_context)
 
           terms, attempt_stack, attempt_memory = self._generate(
             _rng, seed=nonterminal,
-            inputs=inputs, stack=attempt_stack, memory=attempt_memory, attempts=attempts
+            stack=attempt_stack, memory=attempt_memory, node_context=node_context,
+            attempts=attempts
           )
           result.extend(terms)
 
         else:
           raise ValueError('Improperly normalized transition table!')
 
-      attempt_auto_context = {'rng': _rng, 'inputs': inputs, 'stack': attempt_stack, 'memory': attempt_memory}
+      attempt_auto_context = {'rng': _rng, 'stack': attempt_stack, 'memory': attempt_memory, **node_context}
 
       if seed.check(attempt_auto_context):
         if active_condition.check(seed.parameters, attempt_auto_context):

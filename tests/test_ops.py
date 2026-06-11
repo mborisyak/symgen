@@ -34,10 +34,10 @@ def test_machine():
 
   expression = [
     ('const', 1),
-    ('variable', 0),
-    ('add', None),
-    ('variable', 1),
-    ('mul', None),
+    ('load', 0),
+    ('add', ),
+    ('load', 1),
+    ('mul', ),
   ]
   n = 4
   inputs = np.arange(2 * n, dtype=int).reshape((2, n))
@@ -51,63 +51,6 @@ def test_machine():
 
   assert np.all(np.abs(result - expected) < 1.0e-6)
   assert np.all(np.abs(trace[-1] - expected) < 1.0e-6)
-
-def test_source():
-  f = lambda i: i + 1
-  g = lambda i: 1 + i
-  import dis
-  assert dis.Bytecode(f) == dis.Bytecode(g)
-
-def test_sampling():
-  import random
-  n = 32
-  ps = [random.expovariate() for _ in range(n)]
-
-  rng = random.Random(123)
-  np_rng = np.random.default_rng(123)
-
-  def s1(rng, likelihoods):
-
-    u = rng.uniform(0, 1) * sum(likelihoods)
-    c = 0.0
-    for i in range(len(likelihoods)):
-      c += likelihoods[i]
-
-      if c >= u:
-        return i
-
-    raise ValueError
-
-  N = 32 * 1024
-
-  import time
-  start_t = time.perf_counter()
-  for _ in range(N):
-    s1(rng, ps)
-  end_t = time.perf_counter()
-  print(f's1: {N / (end_t - start_t) / 1.0e+6} Miter/sec')
-
-  def s2(likelihoods):
-    return random.choices(range(n), weights=likelihoods)
-
-  import time
-  start_t = time.perf_counter()
-  for _ in range(N):
-    s2(ps)
-  end_t = time.perf_counter()
-  print(f's2: {N / (end_t - start_t)/ 1.0e+6} Miter/sec')
-
-  def s3(rng, likelihoods):
-    ls = np.array(likelihoods)
-    p = ls / np.sum(ls)
-    return rng.choice(n, p=p, replace=True)
-
-  import time
-  start_t = time.perf_counter()
-  for _ in range(N):
-    s3(np_rng, ps)
-  end_t = time.perf_counter()
-  print(f's3: {N / (end_t - start_t)/ 1.0e+6} Miter/sec')
 
 def test_alloc():
   import random, time

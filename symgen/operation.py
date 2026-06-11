@@ -1,10 +1,12 @@
 from typing import Protocol, Any
+import inspect
 
 import numpy as np
 
 __all__ = [
   'Operation',
   'inspect_op',
+  'bind',
 ]
 
 class Operation(Protocol):
@@ -12,23 +14,36 @@ class Operation(Protocol):
     ...
 
 def inspect_op(op: Operation):
-  import inspect
-
+  """Return `(arity, arguments)`: positional params are stack operands, keyword-only params are baked args."""
   signature = inspect.signature(op)
-  assert all(p.kind != inspect.Parameter.VAR_POSITIONAL for _, p in signature.parameters.items()), \
-    'functions with variable positional arguments are not valid operations'
+  parameters = signature.parameters
 
-  assert all(p.kind != inspect.Parameter.VAR_KEYWORD for _, p in signature.parameters.items()), \
-    'functions with variable keyword arguments are not valid operations'
+  assert all(p.kind != inspect.Parameter.VAR_POSITIONAL for p in parameters.values()), \
+    'operations may not take *args (varargs are forbidden)'
 
-  arity = len([
-    p for _, p in signature.parameters.items()
-    if p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD or p.kind == inspect.Parameter.POSITIONAL_ONLY
-  ])
+  assert all(p.kind != inspect.Parameter.VAR_KEYWORD for p in parameters.values()), \
+    'operations may not take **kwargs'
 
-  scope_variables = set([
-    name for name, p in signature.parameters.items()
+  arity = sum(
+    1 for p in parameters.values()
+    if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+  )
+
+  arguments = tuple(
+    name for name, p in parameters.items()
     if p.kind == inspect.Parameter.KEYWORD_ONLY
-  ])
+  )
 
-  return arity, scope_variables
+  return arity, arguments
+
+def bind(arguments: tuple[str, ...], args, memory):
+  """Map keyword-only params to values: `memory` gets the memory list, the rest are baked args."""
+  baked = [name for name in arguments if name != 'memory']
+  assert len(args) == len(baked), \
+    f'operation expects arguments {baked}, got {len(args)}: {args}'
+
+  values = iter(args)
+  return {
+    name: (memory if name == 'memory' else next(values))
+    for name in arguments
+  }

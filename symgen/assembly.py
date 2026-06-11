@@ -1,28 +1,62 @@
 import numpy as np
 
+from .lib import merge
+
 __all__ = [
-  'Assembly'
+  'Assembly',
+  'pretty',
 ]
 
-### 1 or 1.0 --- float constant (push 1.0 into the stack);
-### (1) --- read the 1st input cell and push it into the stack (indexing starts with 0);
-### [1] --- read the 1st memory cell and push it into the stack (indexing starts with 0);
-### {1} --- pop and store in the 1st memory cell.
+INFIX: dict[str, str] = {
+  'add':    '({0} + {1})',
+  'sub':    '({0} - {1})',
+  'mul':    '({0} * {1})',
+  'div':    '({0} / {1})',
+  'neg':    '(-{0})',
+  'inv':    '(1 / {0})',
+  'log':    'log({0})',
+  'exp':    'exp({0})',
+  'sqrt':   'sqrt({0})',
+  'square': '({0})^2',
+}
+
+def pretty(program, properties):
+  """Render a stack program as a readable expression; values left on the stack are the outputs."""
+  lines = []
+  stack = []
+
+  for op, *args in program:
+    if op == 'const':
+      stack.append(f'{args[0]:g}')
+    elif op == 'load':
+      stack.append(f'm{args[0]}')
+    elif op == 'store':
+      lines.append(f'm{args[0]} = {stack.pop()}')
+    else:
+      arity, _ = properties[op]
+      operands = [stack.pop() for _ in range(arity)]
+      template = INFIX.get(op)
+      if template is not None:
+        stack.append(template.format(*operands))
+      else:
+        argument = f'[{", ".join(str(a) for a in args)}]' if len(args) > 0 else ''
+        stack.append(f'{op}{argument}({", ".join(operands)})')
+
+  for k, expr in enumerate(stack):
+    lines.append(f'out{k} = {expr}')
+
+  return '\n'.join(lines)
 
 CORE_OPERATORS: dict[str, str] = {
-  'input': '({integer:d})',
-  'memory': '[{integer:d}]',
-  'store': '{{{integer:d}}}',
+  'load': '({integer:d})',
+  'store': '[{integer:d}]',
   'const': '{value:g}',
-  'integer': '{value:d}',
 }
 
 PRETTY_CORE_OPERATORS: dict[str, str] = {
-  'input': 'x_{integer:d}',
-  'memory': 'm_{integer:d}',
+  'load': 'm_{integer:d}',
   'store': 'm_{integer:d} :=',
   'const': '{value:g}',
-  'integer': '{value:d}'
 }
 
 PRETTY_OPERATORS: dict[str, str] = {
@@ -40,8 +74,7 @@ PRETTY_OPERATORS: dict[str, str] = {
 }
 
 LATEX_CORE_OPERATORS: dict[str, str] = {
-  'input': 'x_{{{integer:d}}}',
-  'memory': 'm_{{{integer:d}}}',
+  'load': 'm_{{{integer:d}}}',
   'store': 'm_{{{integer:d}}} :=',
   'const': '{value:g}'
 }
@@ -59,20 +92,6 @@ LATEX_OPERATORS: dict[str, str] = {
   'erf': '\\mathrm{{erf}}\\left({arg1}\\right)',
   'neg': '\\left(-{arg1}\\right)'
 }
-
-def merge(*libraries: dict[str, str]):
-  library = dict()
-
-  for lib in libraries:
-    for k in lib:
-      k_lower = k.lower()
-
-      if k_lower in library:
-        raise ValueError(f'operator {k_lower} is already in the library')
-
-      library[k_lower] = lib[k]
-
-  return library
 
 
 class Assembly(object):

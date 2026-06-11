@@ -1,17 +1,29 @@
 import numpy as np
+import jax
+import jax.numpy as jnp
 
-from .operation import inspect_op
-from .lib import Operation, merge
+from .operation import inspect_op, bind, Operation
+from .assembly import pretty
+from .lib import merge
 
 class StackMachine(object):
   def __init__(self, *libraries: dict[str, Operation], max_stack_size: int | None=None):
-    self.library = merge(*libraries)
+    library = merge(*libraries)
 
     self.properties = {
       name: inspect_op(op)
-      for name, op in self.library.items()
+      for name, op in library.items()
+    }
+    self.library = {
+      name: (op if 'memory' in self.properties[name][1] else jax.jit(op))
+      for name, op in library.items()
     }
     self.max_stack_size = max_stack_size
+
+  @staticmethod
+  def _address(body: str):
+    """Integer body -> numeric cell; identifier body -> named cell."""
+    return int(body) if body.isdigit() else body
 
   def parse(self, code: str):
     instructions = code.split()
@@ -23,16 +35,10 @@ class StackMachine(object):
         expression.append((instruction, ))
 
       elif instruction.startswith('(') and instruction.endswith(')'):
-        addr = int(instruction[1:-1])
-        expression.append(('variable', addr))
+        expression.append(('load', self._address(instruction[1:-1])))
 
       elif instruction.startswith('[') and instruction.endswith(']'):
-        addr = int(instruction[1:-1])
-        expression.append(('load', addr))
-
-      elif instruction.startswith('{') and instruction.endswith('}'):
-        addr = int(instruction[1:-1])
-        expression.append(('store', addr))
+        expression.append(('store', self._address(instruction[1:-1])))
 
       else:
         try:
@@ -44,6 +50,24 @@ class StackMachine(object):
 
     return expression
 
+  def _resolve(self, expression, input_names):
+    """Resolve named load/store addresses to integer cells (inputs first, then first-seen names)."""
+    names = {name: i for i, name in enumerate(input_names)}
+    next_cell = len(names)
+
+    resolved = list()
+    for op, *args in expression:
+      if op in ('load', 'store') and len(args) > 0 and isinstance(args[0], str):
+        name = args[0]
+        if name not in names:
+          names[name] = next_cell
+          next_cell += 1
+        resolved.append((op, names[name]))
+      else:
+        resolved.append((op, *args))
+
+    return resolved
+
   def evaluate(self, expression, *inputs):
     if len(inputs) == 0:
       inputs = np.ndarray(shape=(0, 1), dtype=np.float32)
@@ -52,100 +76,115 @@ class StackMachine(object):
 
     return self(expression, inputs)
 
-  def __call__(self, expression, inputs=None, *, out=None):
+  @staticmethod
+  def _n_cells(expression, n_in):
+    """Number of memory cells: inputs plus any cell the program loads/stores."""
+    addresses = [args[0] for op, *args in expression if op in ('load', 'store') and len(args) > 0]
+    return max(n_in, 1 + max(addresses)) if len(addresses) > 0 else n_in
+
+  def _prepare(self, expression, inputs, kwargs):
+    """Return (resolved expression, inputs array, n_cells)."""
     if isinstance(expression, str):
       expression = self.parse(expression)
+
+    if len(kwargs) > 0:
+      if inputs is not None:
+        raise ValueError('provide inputs either positionally or as keyword arguments, not both')
+      input_names = list(kwargs.keys())
+      inputs = np.stack([np.asarray(kwargs[name]) for name in input_names], axis=0)
+    else:
+      input_names = []
+
+    expression = self._resolve(expression, input_names)
 
     if inputs is None:
       inputs = np.ndarray(shape=(0, 1), dtype=np.float32)
 
+    return expression, inputs, self._n_cells(expression, inputs.shape[0])
+
+  def _seed_memory(self, inputs, n_cells):
+    """Memory is a list of jax arrays; cells 0..n_in-1 are the input rows."""
+    memory = [None] * n_cells
+    for i in range(inputs.shape[0]):
+      memory[i] = inputs[i]
+    return memory
+
+  def _run(self, expression, inputs, n_cells):
+    """Execute a resolved program on jax `inputs` and return the output stack as (n_out, *batch)."""
+    batch = inputs.shape[1:]
+    memory = self._seed_memory(inputs, n_cells)
+    stack = []
+
+    for op, *args in expression:
+      arity, arguments = self.properties[op]
+      operands = [stack.pop() for _ in range(arity)]
+
+      result = self.library[op](*operands, **bind(arguments, args, memory))
+      if result is not None:
+        stack.append(result)
+
+    if len(stack) > 0:
+      return jnp.stack([jnp.broadcast_to(v, batch) for v in stack])
+    else:
+      return jnp.zeros((0, *batch), dtype=inputs.dtype)
+
+  def __call__(self, expression, inputs=None, *, out=None, **kwargs):
+    expression, inputs, n_cells = self._prepare(expression, inputs, kwargs)
+
+    inputs = jnp.asarray(inputs)
     if inputs.ndim == 1:
       expanded = True
       inputs = inputs[:, None]
     else:
       expanded = False
 
-    n, *batch = inputs.shape
-
-    max_stack_size = len(expression) if self.max_stack_size is None else self.max_stack_size
-    max_stack_size = min(max_stack_size, len(expression))
-
-    stack = np.ndarray(shape=(max_stack_size, *batch), dtype=inputs.dtype)
-    index = 0
-    memory = np.ndarray(shape=(max_stack_size, *batch), dtype=inputs.dtype)
-
-    for op, *args in expression:
-      arity, scope = self.properties[op]
-      arguments = [stack[index - i - 1] for i in range(arity)]
-
-      kwargs = {}
-      if 'inputs' in scope:
-        kwargs['inputs'] = inputs
-      if 'memory' in scope:
-        kwargs['memory'] = memory
-      if 'argument' in scope:
-        kwargs['argument'], = args
-
-      index -= arity
-
-      if 'out' in scope:
-        self.library[op](*arguments, **kwargs, out=stack[index])
-        index += 1
-      else:
-        result = self.library[op](*arguments, **kwargs)
-        if result is not None:
-          stack[index] = result
-          index += 1
+    outputs = self._run(expression, inputs, n_cells)
 
     if expanded:
-      stack = np.squeeze(stack, axis=-1)
+      outputs = jnp.squeeze(outputs, axis=-1)
 
     if out is not None:
-      out[:] = stack[:index]
+      out[:] = np.asarray(outputs)
       return out
     else:
-      return np.copy(stack[:index])
+      return outputs
 
-  def trace(self, expression, inputs=None):
-    if isinstance(expression, str):
-      expression = self.parse(expression)
+  def trace(self, expression, inputs=None, **kwargs):
+    expression, inputs, n_cells = self._prepare(expression, inputs, kwargs)
 
-    if inputs is None:
-      inputs = np.ndarray(shape=(0, 1), dtype=np.float32)
+    inputs = jnp.asarray(inputs)
+    if inputs.ndim == 1:
+      inputs = inputs[:, None]
 
-    n, *batch = inputs.shape
-    dtype = inputs.dtype
+    batch = inputs.shape[1:]
+    memory = self._seed_memory(inputs, n_cells)
+    stack = []
+    records = []
 
-    stack = np.ndarray(shape=(len(expression), *batch), dtype=dtype)
-    index = 0
-    memory = np.ndarray(shape=(len(expression), *batch), dtype=dtype)
-    expression_lens = np.ndarray(shape=(len(expression), ), dtype=np.uint32)
+    for op, *args in expression:
+      arity, arguments = self.properties[op]
+      operands = [stack.pop() for _ in range(arity)]
 
-    for op, *arg in expression:
-      arity, scope = self.properties[op]
-      l = 0
-      arguments = []
-      for i in range(arity):
-        arguments.append(stack[index - l - 1])
-        l += expression_lens[index - l - 1]
-
-      expression_lens[index] = l + 1
-
-      kwargs = {}
-      if 'inputs' in scope:
-        kwargs['inputs'] = inputs
-      if 'memory' in scope:
-        kwargs['memory'] = memory
-      if 'argument' in scope:
-        kwargs['argument'], = arg
-
-      if 'out' in scope:
-        self.library[op](*arguments, **kwargs, out=stack[index])
+      result = self.library[op](*operands, **bind(arguments, args, memory))
+      if result is not None:
+        stack.append(result)
+        records.append(result)
       else:
-        result = self.library[op](*arguments, **kwargs)
-        if result is not None:
-          stack[index] = result
+        records.append(operands[0] if len(operands) > 0 else jnp.zeros(batch, dtype=inputs.dtype))
 
-      index += 1
+    return jnp.stack([jnp.broadcast_to(v, batch) for v in records])
 
-    return stack[:index]
+  def compile(self, program, n_in):
+    """Compile a program into a fused, jitted callable f(inputs) -> outputs."""
+    if isinstance(program, str):
+      program = self._resolve(self.parse(program), [])
+
+    n_cells = self._n_cells(program, n_in)
+    return jax.jit(lambda inputs: self._run(program, jnp.asarray(inputs), n_cells))
+
+  def show(self, program):
+    """Render a program as a readable expression (see `symgen.assembly.pretty`)."""
+    if isinstance(program, str):
+      program = self._resolve(self.parse(program), [])
+
+    return pretty(program, self.properties)
